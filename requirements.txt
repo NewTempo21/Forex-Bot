@@ -1,6 +1,6 @@
-discord.py
-requests
-pandas
-numpy<2.0.0
-ta
 flask
+discord.py
+pandas
+ta
+requests
+tradelocker
