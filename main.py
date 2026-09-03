@@ -3,204 +3,206 @@ import asyncio
 import discord
 from discord.ext import commands, tasks
 import pandas as pd
-import pandas_ta as ta
+import ta
 import requests
 
-# ==========================================
+# ==============================================================================
 # CONFIGURATION & DISCORD SETUP
-# ==========================================
+# ==============================================================================
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN_BOT")
-DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID", "0"))  # Set your target channel ID
+DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
 
 # TradeLocker API Credentials
 TL_EMAIL = os.getenv("TRADELOCKER_EMAIL")
 TL_PASSWORD = os.getenv("TRADELOCKER_PASSWORD")
 TL_SERVER = os.getenv("TRADELOCKER_SERVER")
-TL_BASE_URL = "https://live.tradelocker.com/api/v2"  # Update to demo URL if using Demo account
+TL_BASE_URL = "https://live.tradelocker.com/api/v2"
 
-SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "GBPJPY"]
-TIMEFRAMES = ["4h", "1h", "30m", "15m", "1m"]
+# Bot configuration
+SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD"]
+TIMEFRAME = "1h"
 
 intents = discord.Intents.default()
-intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Global Auth Token Storage
-tl_access_token = None
-
-
-# ==========================================
-# TRADELOCKER API AUTHENTICATION & DATA
-# ==========================================
+# ==============================================================================
+# TRADELOCKER API FUNCTIONS
+# ==============================================================================
 def get_tradelocker_token():
-    global tl_access_token
+    """Authenticates with TradeLocker and returns an access token."""
     url = f"{TL_BASE_URL}/auth/jwt/token"
     payload = {
         "email": TL_EMAIL,
         "password": TL_PASSWORD,
         "server": TL_SERVER
     }
+    headers = {"Content-Type": "application/json"}
+    
     try:
-        response = requests.post(url, json=payload)
-        if response.status_code == 200:
-            tl_access_token = response.json().get("accessToken")
-            return tl_access_token
-        else:
-            print(f"Auth Failed: {response.status_code} - {response.text}")
-            return None
+        response = requests.post(url, json=payload, headers=headers, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        return data.get("accessToken")
     except Exception as e:
-        print(f"Auth Exception: {e}")
+        print(f"[ERROR] Failed to authenticate with TradeLocker: {e}")
         return None
 
-def fetch_klines(symbol, timeframe, limit=100):
-    global tl_access_token
-    if not tl_access_token:
-        get_tradelocker_token()
+def fetch_market_data(symbol, timeframe="1h", limit=100):
+    """Fetches historical price data for a given symbol from TradeLocker."""
+    token = get_tradelocker_token()
+    if not token:
+        return None
 
-    headers = {"Authorization": f"Bearer {tl_access_token}"}
-    # Map timeframe strings to API resolution formats if necessary
-    url = f"{TL_BASE_URL}/market/bar?symbol={symbol}&resolution={timeframe}&limit={limit}"
-    
-    try:
-        response = requests.get(url, headers=headers)
-        if response.status_code == 401:  # Token expired, retry once
-            get_tradelocker_token()
-            headers = {"Authorization": f"Bearer {tl_access_token}"}
-            response = requests.get(url, headers=headers)
-            
-        if response.status_code == 200:
-            data = response.json()
-            # Convert response bars into pandas DataFrame
-            df = pd.DataFrame(data.get("bars", []))
-            if not df.empty:
-                df['close'] = df['c'].astype(float)
-                df['high'] = df['h'].astype(float)
-                df['low'] = df['l'].astype(float)
-                df['open'] = df['o'].astype(float)
-                return df
-    except Exception as e:
-        print(f"Error fetching data for {symbol} ({timeframe}): {e}")
-    
-    return pd.DataFrame()
-
-
-# ==========================================
-# TECHNICAL ANALYSIS ENGINE
-# ==========================================
-def analyze_pair(symbol):
-    data = {}
-    for tf in TIMEFRAMES:
-        data[tf] = fetch_klines(symbol, tf)
-
-    # 1. 4H Trend Pattern & Stack
-    df_4h = data.get("4h")
-    pattern_4h = "CONSOLIDATION PATTERN ⏳"
-    stack_4h = "NEUTRAL"
-    if not df_4h.empty and len(df_4h) >= 20:
-        ema9 = ta.ema(df_4h['close'], length=9)
-        ema20 = ta.ema(df_4h['close'], length=20)
-        if ema9.iloc[-1] > ema20.iloc[-1]:
-            stack_4h = "BULLISH BIAS (WEAK STACK) 🐂"
-        elif ema9.iloc[-1] < ema20.iloc[-1]:
-            stack_4h = "BEARISH BIAS (WEAK STACK) 🐻"
-
-    # 2. 1H EMA Stack
-    df_1h = data.get("1h")
-    stack_1h = "NEUTRAL"
-    if not df_1h.empty and len(df_1h) >= 20:
-        ema9 = ta.ema(df_1h['close'], length=9)
-        ema20 = ta.ema(df_1h['close'], length=20)
-        if ema9.iloc[-1] > ema20.iloc[-1]:
-            stack_1h = "BULLISH EXPANSION 🟢"
-        elif ema9.iloc[-1] < ema20.iloc[-1]:
-            stack_1h = "BEARISH EXPANSION 🔴"
-
-    # 3. 30M Setup
-    df_30m = data.get("30m")
-    setup_30m = "CONSOLIDATING ⏳"
-    if not df_30m.empty and len(df_30m) >= 20:
-        ema9 = ta.ema(df_30m['close'], length=9)
-        ema20 = ta.ema(df_30m['close'], length=20)
-        close_30m = df_30m['close'].iloc[-1]
-        dist_9 = abs(close_30m - ema9.iloc[-1]) / close_30m
-        if dist_9 > 0.003:  # Price extended beyond 0.3% of EMA
-            setup_30m = "EXTENDED FROM EMAS ⚡"
-        elif ema9.iloc[-1] > ema20.iloc[-1]:
-            setup_30m = "BULLISH RETEST 📈"
-        elif ema9.iloc[-1] < ema20.iloc[-1]:
-            setup_30m = "BEARISH RETEST 📉"
-
-    # 4. 15M Setup
-    df_15m = data.get("15m")
-    setup_15m = "CONSOLIDATING ⏳"
-    if not df_15m.empty and len(df_15m) >= 20:
-        ema9 = ta.ema(df_15m['close'], length=9)
-        ema20 = ta.ema(df_15m['close'], length=20)
-        close_15m = df_15m['close'].iloc[-1]
-        dist_9 = abs(close_15m - ema9.iloc[-1]) / close_15m
-        if dist_9 > 0.0025:
-            setup_15m = "EXTENDED FROM EMAS ⚡"
-        elif ema9.iloc[-1] > ema20.iloc[-1]:
-            setup_15m = "PULLBACK TO EMA 🟢"
-        else:
-            setup_15m = "PULLBACK TO EMA 🔴"
-
-    # 5. 1M Trigger Check
-    df_1m = data.get("1m")
-    trigger_1m = "NO 1M TRIGGER ⚪"
-    current_price = 0.0
-    if not df_1m.empty and len(df_1m) >= 20:
-        current_price = df_1m['close'].iloc[-1]
-        ema9_1m = ta.ema(df_1m['close'], length=9)
-        ema20_1m = ta.ema(df_1m['close'], length=20)
-        # Check cross on the latest completed 1M candle
-        if ema9_1m.iloc[-2] < ema20_1m.iloc[-2] and ema9_1m.iloc[-1] > ema20_1m.iloc[-1]:
-            trigger_1m = "BULLISH CROSSOVER 🟢"
-        elif ema9_1m.iloc[-2] > ema20_1m.iloc[-2] and ema9_1m.iloc[-1] < ema20_1m.iloc[-1]:
-            trigger_1m = "BEARISH CROSSOVER 🔴"
-
-    return {
+    url = f"{TL_BASE_URL}/market/candles"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    params = {
         "symbol": symbol,
-        "price": current_price,
-        "pattern_4h": pattern_4h,
-        "stack_4h": stack_4h,
-        "stack_1h": stack_1h,
-        "setup_30m": setup_30m,
-        "setup_15m": setup_15m,
-        "trigger_1m": trigger_1m
+        "resolution": timeframe,
+        "limit": limit
     }
 
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+        response.raise_for_status()
+        candles = response.json().get("candles", [])
+        
+        if not candles:
+            return None
 
-# ==========================================
-# DISCORD BOT COMMANDS & SCANNER LOOP
-# ==========================================
-def build_scan_output():
-    message = ""
+        # Convert candle array into a structured Pandas DataFrame
+        df = pd.DataFrame(candles)
+        # Expected TradeLocker schema columns: ['t', 'o', 'h', 'l', 'c', 'v']
+        df = df.rename(columns={
+            't': 'timestamp',
+            'o': 'open',
+            'h': 'high',
+            'l': 'low',
+            'c': 'close',
+            'v': 'volume'
+        })
+        
+        # Ensure numeric types
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        return df
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch candles for {symbol}: {e}")
+        return None
+
+# ==============================================================================
+# TECHNICAL ANALYSIS & INDICATORS
+# ==============================================================================
+def calculate_indicators(df):
+    """Calculates RSI, EMAs, and MACD using the pure-Python 'ta' library."""
+    if df is None or df.empty or len(df) < 30:
+        return None
+
+    # RSI (14 period)
+    df['rsi'] = ta.momentum.rsi(df['close'], window=14)
+
+    # Exponential Moving Averages
+    df['ema_20'] = ta.trend.ema_indicator(df['close'], window=20)
+    df['ema_50'] = ta.trend.ema_indicator(df['close'], window=50)
+    df['ema_200'] = ta.trend.ema_indicator(df['close'], window=200)
+
+    # MACD
+    macd_object = ta.trend.MACD(df['close'], window_slow=26, window_fast=12, window_sign=9)
+    df['macd'] = macd_object.macd()
+    df['macd_signal'] = macd_object.macd_signal()
+    df['macd_diff'] = macd_object.macd_diff()
+
+    return df
+
+def analyze_signals(symbol, df):
+    """Evaluates strategy logic for oversold/overbought conditions."""
+    if df is None or len(df) < 2:
+        return None
+
+    latest = df.iloc[-1]
+    previous = df.iloc[-2]
+
+    # Example Strategy Logic: RSI Oversold/Overbought Crosses
+    buy_signal = (previous['rsi'] < 30) and (latest['rsi'] >= 30)
+    sell_signal = (previous['rsi'] > 70) and (latest['rsi'] <= 70)
+
+    if buy_signal:
+        return {
+            "symbol": symbol,
+            "type": "BUY",
+            "rsi": round(latest['rsi'], 2),
+            "close": latest['close'],
+            "ema_200": round(latest['ema_200'], 5) if pd.notnull(latest['ema_200']) else "N/A"
+        }
+    elif sell_signal:
+        return {
+            "symbol": symbol,
+            "type": "SELL",
+            "rsi": round(latest['rsi'], 2),
+            "close": latest['close'],
+            "ema_200": round(latest['ema_200'], 5) if pd.notnull(latest['ema_200']) else "N/A"
+        }
+
+    return None
+
+# ==============================================================================
+# DISCORD BACKGROUND SCANNER LOOP
+# ==============================================================================
+@tasks.loop(minutes=15)
+async def scan_market():
+    """Background task running every 15 minutes to scan pairs and push alerts."""
+    channel = bot.get_channel(DISCORD_CHANNEL_ID)
+    if not channel:
+        print(f"[WARNING] Discord channel ID {DISCORD_CHANNEL_ID} not found.")
+        return
+
+    print("[INFO] Starting market scanner run...")
+
     for symbol in SYMBOLS:
-        res = analyze_pair(symbol)
-        message += f"🔹 **{res['symbol']}**\n"
-        message += f"• **4H Pattern:** {res['pattern_4h']}\n"
-        message += f"• **4H EMA Stack:** {res['stack_4h']}\n"
-        message += f"• **1H EMA Stack:** {res['stack_1h']}\n"
-        message += f"• **30M Setup:** {res['setup_30m']}\n"
-        message += f"• **15M Setup:** {res['setup_15m']}\n"
-        message += f"• **1M Trigger:** {res['trigger_1m']}\n"
-        message += f"• **Price:** {res['price']:.5f} if 'JPY' not in symbol else f\"{res['price']:.3f}\"\n\n"
-    
-    message += "Use `!scan` for execution signals or `!scalp` for micro-entries"
-    return message
+        df = fetch_market_data(symbol, timeframe=TIMEFRAME)
+        if df is None:
+            continue
 
+        df = calculate_indicators(df)
+        signal = analyze_signals(symbol, df)
+
+        if signal:
+            color = discord.Color.green() if signal['type'] == "BUY" else discord.Color.red()
+            embed = discord.Embed(
+                title=f"🚨 Forex Signal Alert: {signal['symbol']} ({signal['type']})",
+                color=color
+            )
+            embed.add_field(name="Signal Type", value=signal['type'], inline=True)
+            embed.add_field(name="Close Price", value=str(signal['close']), inline=True)
+            embed.add_field(name="RSI (14)", value=str(signal['rsi']), inline=True)
+            embed.add_field(name="200 EMA", value=str(signal['ema_200']), inline=True)
+            embed.set_footer(text=f"Timeframe: {TIMEFRAME} | Powered by TradeLocker")
+
+            await channel.send(embed=embed)
+            print(f"[ALERT] Sent {signal['type']} signal for {symbol} to Discord.")
+
+        # Rate limiting pause between pair queries
+        await asyncio.sleep(2)
+
+@scan_market.before_loop
+async def before_scan():
+    """Wait until the Discord bot is fully logged in before starting scanner loop."""
+    await bot.wait_until_ready()
+
+# ==============================================================================
+# BOT EVENTS & STARTUP
+# ==============================================================================
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user.name}")
-    get_tradelocker_token()
-
-@bot.command(name="scan")
-async def scan_command(ctx):
-    """Manual command to trigger a scan on demand."""
-    async with ctx.typing():
-        report = build_scan_output()
-        await ctx.send(report)
+    print(f"[SUCCESS] Bot connected as {bot.user.name} (ID: {bot.user.id})")
+    if not scan_market.is_running():
+        scan_market.start()
 
 if __name__ == "__main__":
-    bot.run(DISCORD_TOKEN)
+    if not DISCORD_TOKEN:
+        print("[CRITICAL] DISCORD_TOKEN_BOT is missing from Environment Variables.")
+    else:
+        bot.run(DISCORD_TOKEN)
