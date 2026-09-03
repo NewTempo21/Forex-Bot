@@ -1,6 +1,5 @@
 discord.py>=2.0.0
-pandas
-numpy<2.0.0
+pandas==2.2.2
+numpy==1.26.4
 pandas-ta-classic
 requests
-
