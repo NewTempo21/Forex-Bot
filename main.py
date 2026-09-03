@@ -1,10 +1,31 @@
 import os
 import asyncio
+from threading import Thread
+from flask import Flask
 import discord
 from discord.ext import commands, tasks
 import pandas as pd
 import ta
 import requests
+
+# ==============================================================================
+# FLASK WEB SERVER (FOR REPLIT PORT BINDING)
+# ==============================================================================
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot is alive and monitoring multi-timeframe markets!"
+
+def run_web_server():
+    # Binds to Replit's assigned PORT environment variable, defaulting to 8080
+    port = int(os.getenv("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    t = Thread(target=run_web_server)
+    t.daemon = True
+    t.start()
 
 # ==============================================================================
 # CONFIGURATION & DISCORD SETUP
@@ -18,9 +39,17 @@ TL_PASSWORD = os.getenv("TRADELOCKER_PASSWORD")
 TL_SERVER = os.getenv("TRADELOCKER_SERVER")
 TL_BASE_URL = "https://live.tradelocker.com/api/v2"
 
-# Bot configuration
-SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD"]
-TIMEFRAME = "1h"
+# Bot configuration (Includes GBPJPY)
+SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "GBPJPY"]
+
+# Multi-Timeframe mapping for TradeLocker API resolutions
+TIMEFRAMES = {
+    "4h": "4h",
+    "1h": "1h",
+    "30m": "30m",
+    "15m": "15m",
+    "1m": "1m"
+}
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -47,8 +76,8 @@ def get_tradelocker_token():
         print(f"[ERROR] Failed to authenticate with TradeLocker: {e}")
         return None
 
-def fetch_market_data(symbol, timeframe="1h", limit=100):
-    """Fetches historical price data for a given symbol from TradeLocker."""
+def fetch_market_data(symbol, timeframe_res, limit=100):
+    """Fetches historical price data for a given symbol and resolution."""
     token = get_tradelocker_token()
     if not token:
         return None
@@ -60,7 +89,7 @@ def fetch_market_data(symbol, timeframe="1h", limit=100):
     }
     params = {
         "symbol": symbol,
-        "resolution": timeframe,
+        "resolution": timeframe_res,
         "limit": limit
     }
 
@@ -74,7 +103,6 @@ def fetch_market_data(symbol, timeframe="1h", limit=100):
 
         # Convert candle array into a structured Pandas DataFrame
         df = pd.DataFrame(candles)
-        # Expected TradeLocker schema columns: ['t', 'o', 'h', 'l', 'c', 'v']
         df = df.rename(columns={
             't': 'timestamp',
             'o': 'open',
@@ -90,7 +118,7 @@ def fetch_market_data(symbol, timeframe="1h", limit=100):
 
         return df
     except Exception as e:
-        print(f"[ERROR] Failed to fetch candles for {symbol}: {e}")
+        print(f"[ERROR] Failed to fetch candles for {symbol} ({timeframe_res}): {e}")
         return None
 
 # ==============================================================================
@@ -117,7 +145,7 @@ def calculate_indicators(df):
 
     return df
 
-def analyze_signals(symbol, df):
+def analyze_signals(symbol, tf_label, df):
     """Evaluates strategy logic for oversold/overbought conditions."""
     if df is None or len(df) < 2:
         return None
@@ -125,13 +153,14 @@ def analyze_signals(symbol, df):
     latest = df.iloc[-1]
     previous = df.iloc[-2]
 
-    # Example Strategy Logic: RSI Oversold/Overbought Crosses
+    # Strategy Logic: RSI Oversold/Overbought Crosses
     buy_signal = (previous['rsi'] < 30) and (latest['rsi'] >= 30)
     sell_signal = (previous['rsi'] > 70) and (latest['rsi'] <= 70)
 
     if buy_signal:
         return {
             "symbol": symbol,
+            "tf": tf_label,
             "type": "BUY",
             "rsi": round(latest['rsi'], 2),
             "close": latest['close'],
@@ -140,6 +169,7 @@ def analyze_signals(symbol, df):
     elif sell_signal:
         return {
             "symbol": symbol,
+            "tf": tf_label,
             "type": "SELL",
             "rsi": round(latest['rsi'], 2),
             "close": latest['close'],
@@ -151,41 +181,42 @@ def analyze_signals(symbol, df):
 # ==============================================================================
 # DISCORD BACKGROUND SCANNER LOOP
 # ==============================================================================
-@tasks.loop(minutes=15)
+@tasks.loop(minutes=5)
 async def scan_market():
-    """Background task running every 15 minutes to scan pairs and push alerts."""
+    """Background task scanning all symbols across 4H, 1H, 30M, 15M, and 1M charts."""
     channel = bot.get_channel(DISCORD_CHANNEL_ID)
     if not channel:
         print(f"[WARNING] Discord channel ID {DISCORD_CHANNEL_ID} not found.")
         return
 
-    print("[INFO] Starting market scanner run...")
+    print("[INFO] Starting multi-timeframe market scanner run...")
 
     for symbol in SYMBOLS:
-        df = fetch_market_data(symbol, timeframe=TIMEFRAME)
-        if df is None:
-            continue
+        for tf_label, tf_res in TIMEFRAMES.items():
+            df = fetch_market_data(symbol, timeframe_res=tf_res)
+            if df is None:
+                continue
 
-        df = calculate_indicators(df)
-        signal = analyze_signals(symbol, df)
+            df = calculate_indicators(df)
+            signal = analyze_signals(symbol, tf_label, df)
 
-        if signal:
-            color = discord.Color.green() if signal['type'] == "BUY" else discord.Color.red()
-            embed = discord.Embed(
-                title=f"🚨 Forex Signal Alert: {signal['symbol']} ({signal['type']})",
-                color=color
-            )
-            embed.add_field(name="Signal Type", value=signal['type'], inline=True)
-            embed.add_field(name="Close Price", value=str(signal['close']), inline=True)
-            embed.add_field(name="RSI (14)", value=str(signal['rsi']), inline=True)
-            embed.add_field(name="200 EMA", value=str(signal['ema_200']), inline=True)
-            embed.set_footer(text=f"Timeframe: {TIMEFRAME} | Powered by TradeLocker")
+            if signal:
+                color = discord.Color.green() if signal['type'] == "BUY" else discord.Color.red()
+                embed = discord.Embed(
+                    title=f"🚨 Forex Signal Alert: {signal['symbol']} ({signal['tf'].upper()})",
+                    color=color
+                )
+                embed.add_field(name="Signal Type", value=signal['type'], inline=True)
+                embed.add_field(name="Timeframe", value=signal['tf'].upper(), inline=True)
+                embed.add_field(name="Close Price", value=str(signal['close']), inline=True)
+                embed.add_field(name="RSI (14)", value=str(signal['rsi']), inline=True)
+                embed.add_field(name="200 EMA", value=str(signal['ema_200']), inline=True)
+                embed.set_footer(text="Powered by TradeLocker | MTF Scanner")
 
-            await channel.send(embed=embed)
-            print(f"[ALERT] Sent {signal['type']} signal for {symbol} to Discord.")
+                await channel.send(embed=embed)
+                print(f"[ALERT] Sent {signal['type']} signal for {symbol} ({signal['tf'].upper()}) to Discord.")
 
-        # Rate limiting pause between pair queries
-        await asyncio.sleep(2)
+            await asyncio.sleep(0.5)
 
 @scan_market.before_loop
 async def before_scan():
@@ -202,7 +233,9 @@ async def on_ready():
         scan_market.start()
 
 if __name__ == "__main__":
+    keep_alive()
+    
     if not DISCORD_TOKEN:
-        print("[CRITICAL] DISCORD_TOKEN_BOT is missing from Environment Variables.")
+        print("[CRITICAL] DISCORD_BOT_TOKEN is missing from Environment Variables.")
     else:
         bot.run(DISCORD_TOKEN)
