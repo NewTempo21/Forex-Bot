@@ -9,7 +9,7 @@ import ta
 import requests
 
 # ==============================================================================
-# FLASK WEB SERVER (FOR REPLIT PORT BINDING)
+# FLASK WEB SERVER (FOR RENDER HEALTH CHECKS)
 # ==============================================================================
 app = Flask('')
 
@@ -18,7 +18,6 @@ def home():
     return "Bot is alive and monitoring multi-timeframe markets!"
 
 def run_web_server():
-    # Binds to Replit's assigned PORT environment variable, defaulting to 8080
     port = int(os.getenv("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
@@ -39,7 +38,7 @@ TL_PASSWORD = os.getenv("TRADELOCKER_PASSWORD")
 TL_SERVER = os.getenv("TRADELOCKER_SERVER")
 TL_BASE_URL = "https://live.tradelocker.com/api/v2"
 
-# Bot configuration (Includes GBPJPY)
+# Bot configuration
 SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "GBPJPY"]
 
 # Multi-Timeframe mapping for TradeLocker API resolutions
@@ -52,6 +51,7 @@ TIMEFRAMES = {
 }
 
 intents = discord.Intents.default()
+intents.message_content = True  # Required for command prefix processing
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ==============================================================================
@@ -222,6 +222,58 @@ async def scan_market():
 async def before_scan():
     """Wait until the Discord bot is fully logged in before starting scanner loop."""
     await bot.wait_until_ready()
+
+# ==============================================================================
+# DISCORD COMMANDS
+# ==============================================================================
+@bot.command(name="ping")
+async def ping(ctx):
+    """Simple ping command to verify bot responsiveness."""
+    await ctx.send("🏓 Pong! Bot is active and connected.")
+
+@bot.command(name="status")
+async def status(ctx):
+    """Checks the scanner loop status."""
+    is_running = scan_market.is_running()
+    status_msg = "🟢 Active" if is_running else "🔴 Stopped"
+    await ctx.send(f"**MTF Scanner Status:** {status_msg}\n**Monitored Pairs:** {', '.join(SYMBOLS)}")
+
+@bot.command(name="scan")
+async def manual_scan(ctx):
+    """Triggers an immediate manual scan run."""
+    await ctx.send("🔍 Starting manual market scan across all timeframes...")
+    signals_found = 0
+
+    for symbol in SYMBOLS:
+        for tf_label, tf_res in TIMEFRAMES.items():
+            df = fetch_market_data(symbol, timeframe_res=tf_res)
+            if df is None:
+                continue
+
+            df = calculate_indicators(df)
+            signal = analyze_signals(symbol, tf_label, df)
+
+            if signal:
+                signals_found += 1
+                color = discord.Color.green() if signal['type'] == "BUY" else discord.Color.red()
+                embed = discord.Embed(
+                    title=f"🚨 Forex Signal Alert: {signal['symbol']} ({signal['tf'].upper()})",
+                    color=color
+                )
+                embed.add_field(name="Signal Type", value=signal['type'], inline=True)
+                embed.add_field(name="Timeframe", value=signal['tf'].upper(), inline=True)
+                embed.add_field(name="Close Price", value=str(signal['close']), inline=True)
+                embed.add_field(name="RSI (14)", value=str(signal['rsi']), inline=True)
+                embed.add_field(name="200 EMA", value=str(signal['ema_200']), inline=True)
+                embed.set_footer(text="Powered by TradeLocker | MTF Scanner")
+
+                await ctx.send(embed=embed)
+            await asyncio.sleep(0.5)
+
+    if signals_found == 0:
+        await ctx.send("✅ Manual scan complete. No active signals found at this time.")
+    else:
+        await ctx.send(f"✅ Manual scan complete. Found {signals_found} signal(s).")
 
 # ==============================================================================
 # BOT EVENTS & STARTUP
