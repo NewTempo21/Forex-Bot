@@ -1,3 +1,53 @@
+import sys
+import types
+
+# ==============================================================================
+# PRE-IMPORT HOOK FOR TRADELOCKER TYPE-CHECK BYPASS
+# ==============================================================================
+class TradelockerPatcher(types.ModuleType):
+    pass
+
+# We hook directly into Python's module loading system to neutralize the strict typing check
+# before the library can even initialize its internal dictionaries.
+import importlib.abc
+import importlib.machinery
+
+class TradelockerFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+    def find_spec(self, fullname, path, target=None):
+        if fullname == 'tradelocker.tradelocker_api':
+            return importlib.machinery.ModuleSpec(fullname, self)
+        return None
+
+    def create_module(self, spec):
+        return None
+
+    def exec_module(self, module):
+        # Load the original module normally
+        real_mod_name = 'tradelocker.tradelocker_api'
+        mod = importlib.import_module('_tradelocker_api_real')
+        for attr in dir(mod):
+            setattr(module, attr, getattr(mod, attr))
+        
+        # Override _apply_typing to permanently absorb the 'status' field error
+        if hasattr(module, '_apply_typing'):
+            orig_typing = module._apply_typing
+            def patched_apply_typing(df, types_dict, *args, **kwargs):
+                if isinstance(types_dict, dict) and 'status' not in types_dict:
+                    types_dict['status'] = object
+                try:
+                    return orig_typing(df, types_dict, *args, **kwargs)
+                except Exception:
+                    return df
+            module._apply_typing = patched_apply_typing
+
+# Register the finder
+import tradelocker
+sys.modules['_tradelocker_api_real'] = tradelocker.tradelocker_api
+sys.meta_path.insert(0, TradelockerFinder())
+
+# ==============================================================================
+# STANDARD IMPORTS & BOT SETUP
+# ==============================================================================
 import os
 import asyncio
 from threading import Thread
@@ -7,22 +57,7 @@ from discord.ext import commands, tasks
 import pandas as pd
 import ta
 from tradelocker import TLAPI
-import tradelocker.tradelocker_api as tl_api
 
-# ==============================================================================
-# NUCLEAR TRADELOCKER BUG FIX (TOTAL BYPASS)
-# ==============================================================================
-# Completely short-circuit the strict type-checking function that keeps crashing.
-if hasattr(tl_api, '_apply_typing'):
-    def nuclear_bypass(data, *args, **kwargs):
-        if isinstance(data, list):
-            return pd.DataFrame(data)
-        return data
-    tl_api._apply_typing = nuclear_bypass
-
-# ==============================================================================
-# FLASK WEB SERVER (FOR REPLIT/RENDER HEALTH CHECKS)
-# ==============================================================================
 app = Flask('')
 
 @app.route('/')
@@ -38,9 +73,6 @@ def keep_alive():
     t.daemon = True
     t.start()
 
-# ==============================================================================
-# CONFIGURATION & DISCORD SETUP
-# ==============================================================================
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
 
@@ -81,9 +113,6 @@ def get_tl_client():
             tl_client = None
     return tl_client
 
-# ==============================================================================
-# INSTRUMENT RESOLUTION
-# ==============================================================================
 def get_instrument_id(client, symbol):
     try:
         try:
@@ -137,9 +166,6 @@ def debug_print_instruments():
     except Exception as e:
         print(f"[DEBUG] Could not dump instruments: {e}")
 
-# ==============================================================================
-# MARKET DATA FETCHING 
-# ==============================================================================
 def fetch_market_data(symbol, timeframe_res):
     client = get_tl_client()
     if not client:
@@ -197,9 +223,6 @@ def fetch_market_data(symbol, timeframe_res):
         print(f"[ERROR] Failed fetching data for {symbol} ({timeframe_res}): {e}")
         return None
 
-# ==============================================================================
-# TECHNICAL ANALYSIS & 9/20/60/200 EMA STRATEGY
-# ==============================================================================
 def calculate_indicators(df):
     if df is None or df.empty or len(df) < 30:
         return None
@@ -238,9 +261,6 @@ def analyze_signals(symbol, tf_label, df):
         }
     return None
 
-# ==============================================================================
-# DISCORD BACKGROUND SCANNER LOOP
-# ==============================================================================
 @tasks.loop(minutes=3)
 async def scan_market():
     channel = bot.get_channel(DISCORD_CHANNEL_ID)
@@ -273,9 +293,6 @@ async def scan_market():
 async def before_scan():
     await bot.wait_until_ready()
 
-# ==============================================================================
-# DISCORD COMMANDS
-# ==============================================================================
 @bot.command(name="ping")
 async def ping(ctx):
     await ctx.send("🏓 Pong! Bot is active.")
@@ -324,7 +341,6 @@ async def radar(ctx):
             embed.add_field(name=f"🔹 {symbol}", value="⚠️ Data Unavailable", inline=False)
             continue
 
-        # 4H Structure & Pattern Analysis
         if df_4h is not None and len(df_4h) >= 2:
             latest_4h = df_4h.iloc[-1]
             prev_4h = df_4h.iloc[-2]
@@ -338,14 +354,12 @@ async def radar(ctx):
             h4_pattern = "⚖️ RANGE BOUND / CONSOLIDATION"
             h4_stack = "⚪ NEUTRAL STACK"
 
-        # 1H Stack Bias
         latest_1h = df_1h.iloc[-1]
         if latest_1h['ema_9'] > latest_1h['ema_20']:
             h1_stack = "BULLISH EXPANSION 🟢"
         else:
             h1_stack = "BEARISH EXPANSION 🔴"
 
-        # 30M Stack Bias
         m30_stack = "⚡ 30M BULLISH ALIGNMENT"
         if df_30m is not None and not df_30m.empty:
             latest_30m = df_30m.iloc[-1]
@@ -354,7 +368,6 @@ async def radar(ctx):
             else:
                 m30_stack = "🔴 30M BEARISH BIAS"
 
-        # 15M Setup Zone
         m15_setup = "⚡ EXTENDED FROM EMAS"
         if df_15m is not None and not df_15m.empty:
             latest_15m = df_15m.iloc[-1]
@@ -362,7 +375,6 @@ async def radar(ctx):
             if diff_from_20 < (latest_15m['close'] * 0.001):
                 m15_setup = "👀 AT 15M 20 EMA (PRIME RE-ENTRY)"
 
-        # 1M Trigger State
         m1_trigger = "⚪ NO 1M TRIGGER"
         if df_1m is not None and len(df_1m) >= 2:
             sig_1m = analyze_signals(symbol, "1m", df_1m)
@@ -452,9 +464,6 @@ async def manual_scan(ctx):
     else:
         await ctx.send(f"✅ Manual scan complete. Found {signals_found} active signal(s).")
 
-# ==============================================================================
-# BOT EVENTS & STARTUP
-# ==============================================================================
 @bot.event
 async def on_ready():
     print(f"[SUCCESS] Bot connected as {bot.user.name} (ID: {bot.user.id})")
