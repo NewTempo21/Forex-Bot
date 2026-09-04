@@ -32,7 +32,7 @@ def keep_alive():
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
 
-# TradeLocker API Credentials (Updated for HeroFX Render variables)
+# TradeLocker API Credentials (HeroFX Render variables)
 TL_EMAIL = os.getenv("HEROFX_EMAIL")
 TL_PASSWORD = os.getenv("HEROFX_PASSWORD")
 TL_SERVER = os.getenv("HEROFX_SERVER", "HeroFX-Live") 
@@ -74,10 +74,10 @@ def get_tl_client():
     return tl_client
 
 # ==============================================================================
-# MARKET DATA FETCHING (FLEXIBLE INSTRUMENT MATCHING)
+# MARKET DATA FETCHING (ROBUST INSTRUMENT PARSING)
 # ==============================================================================
 def fetch_market_data(symbol, timeframe_res, lookback="5D"):
-    """Fetches historical candle data with dynamic broker instrument ID matching."""
+    """Fetches historical candle data with bulletproof broker instrument matching."""
     client = get_tl_client()
     if not client:
         return None
@@ -101,13 +101,32 @@ def fetch_market_data(symbol, timeframe_res, lookback="5D"):
                     if clean_target in name:
                         instrument_id = row.get('tradableInstrumentId') or row.get('id')
                         break
+            elif isinstance(instruments, list):
+                for item in instruments:
+                    if isinstance(item, dict):
+                        name = str(item.get('name', '')).upper().replace("/", "").replace(".", "")
+                        if clean_target in name:
+                            instrument_id = item.get('tradableInstrumentId') or item.get('id')
+                            break
             elif isinstance(instruments, dict):
-                names = instruments.get('name', [])
-                ids = instruments.get('tradableInstrumentId', []) or instruments.get('id', [])
-                for n, i in zip(names, ids):
-                    if clean_target in str(n).upper().replace("/", "").replace(".", ""):
-                        instrument_id = i
-                        break
+                # Check if it's a dict of lists or similar structure
+                if 'name' in instruments and ('tradableInstrumentId' in instruments or 'id' in instruments):
+                    names = instruments.get('name', [])
+                    ids = instruments.get('tradableInstrumentId', []) or instruments.get('id', [])
+                    for n, i in zip(names, ids):
+                        if clean_target in str(n).upper().replace("/", "").replace(".", ""):
+                            instrument_id = i
+                            break
+                else:
+                    # Iterate through dictionary values if they are item dicts
+                    for val in instruments.values():
+                        if isinstance(val, list):
+                            for item in val:
+                                if isinstance(item, dict):
+                                    name = str(item.get('name', '')).upper().replace("/", "").replace(".", "")
+                                    if clean_target in name:
+                                        instrument_id = item.get('tradableInstrumentId') or item.get('id')
+                                        break
 
         if not instrument_id:
             print(f"[WARNING] Could not find matching instrument ID for {symbol}")
@@ -115,7 +134,7 @@ def fetch_market_data(symbol, timeframe_res, lookback="5D"):
 
         history = client.get_price_history(
             instrument_id=int(instrument_id),
-            resolution=timeframe_res,
+            resolution=timeframe_res.upper(),
             start_timestamp=0,
             end_timestamp=0,
             lookback_period=lookback
