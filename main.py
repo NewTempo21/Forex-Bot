@@ -310,7 +310,7 @@ async def diag(ctx, symbol: str = "EURUSD"):
 
 @bot.command(name="radar")
 async def radar(ctx):
-    """Restored multi-timeframe Pattern & EMA Stacking Dashboard checking 4H, 1H, 30M, 15M, and 1M."""
+    """Pattern & EMA Stacking Dashboard checking 4H, 1H, 30M, 15M, and 1M."""
     await ctx.send("📡 **Generating Pattern & EMA Stacking Dashboard (4H, 1H, 30M, 15M, 1M)...**")
     
     embed = discord.Embed(
@@ -320,26 +320,30 @@ async def radar(ctx):
     )
 
     for symbol in SYMBOLS:
-        # Fetch multi-timeframe data across all 5 required resolutions
+        # Fetch data independently across all timeframes
         df_4h = calculate_indicators(fetch_market_data(symbol, timeframe_res=TIMEFRAMES["4h"]))
         df_1h = calculate_indicators(fetch_market_data(symbol, timeframe_res=TIMEFRAMES["1h"]))
         df_30m = calculate_indicators(fetch_market_data(symbol, timeframe_res=TIMEFRAMES["30m"]))
         df_15m = calculate_indicators(fetch_market_data(symbol, timeframe_res=TIMEFRAMES["15m"]))
         df_1m = calculate_indicators(fetch_market_data(symbol, timeframe_res=TIMEFRAMES["1m"]))
 
-        if df_4h is None or df_1h is None:
+        if df_1h is None or df_1h.empty:
             embed.add_field(name=f"🔹 {symbol}", value="⚠️ Data Unavailable", inline=False)
             continue
 
         # 4H Structure & Pattern Analysis
-        latest_4h = df_4h.iloc[-1]
-        prev_4h = df_4h.iloc[-2]
-        if latest_4h['close'] > prev_4h['close']:
-            h4_pattern = "📈 HIGHER HIGHS & HIGHER LOWS"
-            h4_stack = "BULLISH BIAS (WEAK STACK) 🐂" if latest_4h['ema_9'] < latest_4h['ema_20'] else "BULLISH EXPANSION 🟢"
+        if df_4h is not None and len(df_4h) >= 2:
+            latest_4h = df_4h.iloc[-1]
+            prev_4h = df_4h.iloc[-2]
+            if latest_4h['close'] > prev_4h['close']:
+                h4_pattern = "📈 HIGHER HIGHS & HIGHER LOWS"
+                h4_stack = "BULLISH BIAS (WEAK STACK) 🐂" if latest_4h['ema_9'] < latest_4h['ema_20'] else "BULLISH EXPANSION 🟢"
+            else:
+                h4_pattern = "📉 LOWER HIGHS & LOWER LOWS"
+                h4_stack = "BEARISH BIAS (WEAK STACK) 🐻" if latest_4h['ema_9'] > latest_4h['ema_20'] else "BEARISH EXPANSION 🔴"
         else:
-            h4_pattern = "📉 LOWER HIGHS & LOWER LOWS"
-            h4_stack = "BEARISH BIAS (WEAK STACK) 🐻" if latest_4h['ema_9'] > latest_4h['ema_20'] else "BEARISH EXPANSION 🔴"
+            h4_pattern = "⚖️ RANGE BOUND / CONSOLIDATION"
+            h4_stack = "⚪ NEUTRAL STACK"
 
         # 1H Stack Bias
         latest_1h = df_1h.iloc[-1]
@@ -362,7 +366,7 @@ async def radar(ctx):
         if df_15m is not None and not df_15m.empty:
             latest_15m = df_15m.iloc[-1]
             diff_from_20 = abs(latest_15m['close'] - latest_15m['ema_20'])
-            if diff_from_20 < (latest_15m['close'] * 0.0005):
+            if diff_from_20 < (latest_15m['close'] * 0.001):
                 m15_setup = "👀 AT 15M 20 EMA (PRIME RE-ENTRY)"
 
         # 1M Trigger State
