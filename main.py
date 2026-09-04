@@ -61,12 +61,13 @@ TL_ENVIRONMENT = os.getenv("HEROFX_ENV", "https://live.tradelocker.com")
 # Bot configuration
 SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "GBPJPY"]
 
+# Timeframe mapping (TradingView format: Minutes)
 TIMEFRAMES = {
-    "4h": "4h",
-    "1h": "1h",
-    "30m": "30m",
-    "15m": "15m",
-    "1m": "1m"
+    "4h": "240",
+    "1h": "60",
+    "30m": "30",
+    "15m": "15",
+    "1m": "1"
 }
 
 intents = discord.Intents.default()
@@ -93,9 +94,10 @@ def get_tl_client():
     return tl_client
 
 # ==============================================================================
-# INSTRUMENT RESOLUTION
+# INSTRUMENT RESOLUTION & DEBUG DUMPER
 # ==============================================================================
 def get_instrument_id(client, symbol):
+    """Robustly resolves instrument ID from HeroFX broker specifications."""
     try:
         try:
             iid = client.get_instrument_id_from_symbol_name(symbol)
@@ -130,6 +132,25 @@ def get_instrument_id(client, symbol):
     
     return None
 
+def debug_print_instruments():
+    """Prints all broker instruments to Render console to verify naming convention."""
+    client = get_tl_client()
+    if not client:
+        return
+    try:
+        instruments = client.get_all_instruments()
+        print("=== AVAILABLE BROKER INSTRUMENTS ===")
+        if isinstance(instruments, pd.DataFrame):
+            for _, row in instruments.iterrows():
+                print(f"Name: {row.get('name')} | ID: {row.get('tradableInstrumentId') or row.get('id')}")
+        elif isinstance(instruments, list):
+            for item in instruments:
+                if isinstance(item, dict):
+                    print(f"Name: {item.get('name')} | ID: {item.get('tradableInstrumentId') or item.get('id')}")
+        print("====================================")
+    except Exception as e:
+        print(f"[DEBUG] Could not dump instruments: {e}")
+
 # ==============================================================================
 # MARKET DATA FETCHING
 # ==============================================================================
@@ -141,11 +162,12 @@ def fetch_market_data(symbol, timeframe_res, lookback="5D"):
     try:
         instrument_id = get_instrument_id(client, symbol)
         if not instrument_id:
+            print(f"[WARNING] Instrument ID not found for symbol: {symbol}")
             return None
 
         history = client.get_price_history(
             instrument_id=instrument_id,
-            resolution=timeframe_res.upper(),
+            resolution=str(timeframe_res),
             start_timestamp=0,
             end_timestamp=0,
             lookback_period=lookback
@@ -278,6 +300,35 @@ async def before_scan():
 async def ping(ctx):
     await ctx.send("🏓 Pong! Bot is active.")
 
+@bot.command(name="diag")
+async def diag(ctx, symbol: str = "EURUSD"):
+    """Diagnostic tool to pinpoint exact TradeLocker API data failures."""
+    await ctx.send(f"🔍 **Running diagnostics for {symbol}...**")
+    client = get_tl_client()
+    
+    inst_id = get_instrument_id(client, symbol)
+    if not inst_id:
+        return await ctx.send(f"❌ Failed to find Instrument ID for {symbol}.")
+    
+    await ctx.send(f"✅ Found Instrument ID: `{inst_id}`")
+    
+    try:
+        history = client.get_price_history(
+            instrument_id=inst_id, resolution="60",
+            start_timestamp=0, end_timestamp=0, lookback_period="5D"
+        )
+        if not history:
+            return await ctx.send("❌ API connected, but returned empty history (None).")
+        
+        candles = history if isinstance(history, list) else history.get("candles", [])
+        if not candles:
+            return await ctx.send(f"❌ API returned data, but no candles: `{history}`")
+            
+        await ctx.send(f"✅ Success! Fetched {len(candles)} candles.")
+    except Exception as e:
+        await ctx.send(f"❌ API Error fetching history: `{e}`")
+
+
 @bot.command(name="radar")
 async def radar(ctx):
     await ctx.send("📡 **Running 9/20/60/200 EMA Market Radar...** Analyzing 1H structure.")
@@ -289,7 +340,7 @@ async def radar(ctx):
     )
 
     for symbol in SYMBOLS:
-        df = fetch_market_data(symbol, timeframe_res="1h")
+        df = fetch_market_data(symbol, timeframe_res="60")
         if df is None:
             embed.add_field(name=f"**{symbol}**", value="⚠️ Data Unavailable", inline=True)
             continue
@@ -317,6 +368,46 @@ async def radar(ctx):
 
     embed.set_footer(text="TradeLocker Radar | 9/20/60/200 EMA Alignment")
     await ctx.send(embed=embed)
+
+
+@bot.command(name="scalp")
+async def scalp(ctx):
+    await ctx.send("⚡ **Scalp Scanner Activated:** Scanning 1M and 15M charts for 9/20 EMA triggers...")
+    
+    scalp_timeframes = {"15m": "15", "1m": "1"}
+    scalp_signals = 0
+
+    for symbol in SYMBOLS:
+        for tf_label, tf_res in scalp_timeframes.items():
+            df = fetch_market_data(symbol, timeframe_res=tf_res)
+            if df is None:
+                continue
+
+            df = calculate_indicators(df)
+            signal = analyze_signals(symbol, tf_label, df)
+
+            if signal:
+                scalp_signals += 1
+                color = discord.Color.green() if "BUY" in signal['type'] else discord.Color.red()
+                embed = discord.Embed(
+                    title=f"⚡ SCALP EMA ALERT: {signal['symbol']} ({signal['tf'].upper()})",
+                    color=color
+                )
+                embed.add_field(name="Signal Type", value=signal['type'], inline=True)
+                embed.add_field(name="Timeframe", value=signal['tf'].upper(), inline=True)
+                embed.add_field(name="Price", value=str(signal['close']), inline=True)
+                embed.add_field(name="9 EMA", value=str(signal['ema_9']), inline=True)
+                embed.add_field(name="20 EMA", value=str(signal['ema_20']), inline=True)
+                embed.set_footer(text="Fast Execution Scalp Trigger")
+
+                await ctx.send(embed=embed)
+            await asyncio.sleep(0.3)
+
+    if scalp_signals == 0:
+        await ctx.send("⚡ **Scalp Scan Complete:** No active 1M/15M EMA crossover triggers.")
+    else:
+        await ctx.send(f"⚡ **Scalp Scan Complete:** Found {scalp_signals} active setup(s).")
+
 
 @bot.command(name="scan")
 async def manual_scan(ctx):
@@ -356,6 +447,7 @@ async def manual_scan(ctx):
 @bot.event
 async def on_ready():
     print(f"[SUCCESS] Bot connected as {bot.user.name} (ID: {bot.user.id})")
+    debug_print_instruments() # Dumps exact broker names to logs
     if not scan_market.is_running():
         scan_market.start()
 
