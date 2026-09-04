@@ -9,13 +9,13 @@ import ta
 from tradelocker import TLAPI
 
 # ==============================================================================
-# FLASK WEB SERVER (FOR RENDER HEALTH CHECKS)
+# FLASK WEB SERVER (FOR REPLIT/RENDER HEALTH CHECKS)
 # ==============================================================================
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "Bot is alive and monitoring 9/20/60/200 EMA markets via TradeLocker!"
+    return "Bot is active and monitoring markets via TradeLocker!"
 
 def run_web_server():
     port = int(os.getenv("PORT", 8080))
@@ -38,7 +38,7 @@ TL_PASSWORD = os.getenv("TRADELOCKER_PASSWORD")
 TL_SERVER = os.getenv("TRADELOCKER_SERVER") 
 TL_ENVIRONMENT = os.getenv("TRADELOCKER_ENV", "https://live.tradelocker.com")
 
-# Bot configuration (Six standard pairs)
+# Bot configuration
 SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "GBPJPY"]
 
 # Timeframe mapping matching TradeLocker resolutions
@@ -73,28 +73,58 @@ def get_tl_client():
             tl_client = None
     return tl_client
 
-def fetch_market_data(symbol, timeframe_res, lookback="200D"):
-    """Fetches historical candle data for a given symbol and resolution using the official library."""
+# ==============================================================================
+# MARKET DATA FETCHING (FLEXIBLE INSTRUMENT MATCHING)
+# ==============================================================================
+def fetch_market_data(symbol, timeframe_res, lookback="5D"):
+    """Fetches historical candle data with dynamic broker instrument ID matching."""
     client = get_tl_client()
     if not client:
         return None
 
     try:
-        instrument_id = client.get_instrument_id_from_symbol_name(symbol)
+        instrument_id = None
+        # Try direct lookup first
+        try:
+            instrument_id = client.get_instrument_id_from_symbol_name(symbol)
+        except Exception:
+            pass
+            
+        # Flexible fallback search through all available broker instruments
         if not instrument_id:
+            instruments = client.get_all_instruments()
+            clean_target = symbol.upper().replace("/", "").replace(".", "")
+            
+            if isinstance(instruments, pd.DataFrame):
+                for _, row in instruments.iterrows():
+                    name = str(row.get('name', '')).upper().replace("/", "").replace(".", "")
+                    if clean_target in name:
+                        instrument_id = row.get('tradableInstrumentId') or row.get('id')
+                        break
+            elif isinstance(instruments, dict):
+                names = instruments.get('name', [])
+                ids = instruments.get('tradableInstrumentId', []) or instruments.get('id', [])
+                for n, i in zip(names, ids):
+                    if clean_target in str(n).upper().replace("/", "").replace(".", ""):
+                        instrument_id = i
+                        break
+
+        if not instrument_id:
+            print(f"[WARNING] Could not find matching instrument ID for {symbol}")
             return None
 
         history = client.get_price_history(
             instrument_id=int(instrument_id),
             resolution=timeframe_res,
+            start_timestamp=0,
+            end_timestamp=0,
             lookback_period=lookback
         )
         
-        if not history or "candles" not in history:
-            candles = history if isinstance(history, list) else history.get("candles", [])
-        else:
-            candles = history["candles"]
+        if not history:
+            return None
 
+        candles = history if isinstance(history, list) else history.get("candles", [])
         if not candles:
             return None
 
