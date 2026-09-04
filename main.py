@@ -17,23 +17,17 @@ if hasattr(tl_api, '_apply_typing'):
     
     def safe_apply_typing(*args, **kwargs):
         new_args = list(args)
-        
-        # Look for the type specification dictionary in args and inject 'status'
         for i, arg in enumerate(new_args):
             if isinstance(arg, dict) and 'id' in arg and 'currency' in arg:
                 arg['status'] = str
                 new_args[i] = arg
-                
-        # Look for the type specification dictionary in kwargs and inject 'status'
         for k, v in kwargs.items():
             if isinstance(v, dict) and 'id' in v and 'currency' in v:
                 v['status'] = str
                 kwargs[k] = v
-                
         try:
             return original_apply_typing(*new_args, **kwargs)
-        except Exception as e:
-            print(f"[PATCH WARNING] Bypassed _apply_typing error: {e}")
+        except Exception:
             return new_args[0] if new_args else None
             
     tl_api._apply_typing = safe_apply_typing
@@ -170,7 +164,6 @@ def fetch_market_data(symbol, timeframe_res, lookback="5D"):
     try:
         instrument_id = get_instrument_id(client, symbol)
         if not instrument_id:
-            print(f"[WARNING] Instrument ID not found for symbol: {symbol}")
             return None
 
         history = client.get_price_history(
@@ -239,29 +232,14 @@ def analyze_signals(symbol, tf_label, df):
 
     if bullish_cross:
         return {
-            "symbol": symbol,
-            "tf": tf_label,
-            "type": "BUY 🟢",
-            "close": latest['close'],
-            "ema_9": round(latest['ema_9'], 5),
-            "ema_20": round(latest['ema_20'], 5),
-            "ema_60": round(latest['ema_60'], 5) if pd.notnull(latest['ema_60']) else "N/A",
-            "ema_200": round(latest['ema_200'], 5) if pd.notnull(latest['ema_200']) else "N/A",
-            "rsi": round(latest['rsi'], 2) if pd.notnull(latest['rsi']) else "N/A"
+            "symbol": symbol, "tf": tf_label, "type": "BUY 🟢",
+            "close": latest['close'], "ema_9": round(latest['ema_9'], 5), "ema_20": round(latest['ema_20'], 5)
         }
     elif bearish_cross:
         return {
-            "symbol": symbol,
-            "tf": tf_label,
-            "type": "SELL 🔴",
-            "close": latest['close'],
-            "ema_9": round(latest['ema_9'], 5),
-            "ema_20": round(latest['ema_20'], 5),
-            "ema_60": round(latest['ema_60'], 5) if pd.notnull(latest['ema_60']) else "N/A",
-            "ema_200": round(latest['ema_200'], 5) if pd.notnull(latest['ema_200']) else "N/A",
-            "rsi": round(latest['rsi'], 2) if pd.notnull(latest['rsi']) else "N/A"
+            "symbol": symbol, "tf": tf_label, "type": "SELL 🔴",
+            "close": latest['close'], "ema_9": round(latest['ema_9'], 5), "ema_20": round(latest['ema_20'], 5)
         }
-
     return None
 
 # ==============================================================================
@@ -290,8 +268,6 @@ async def scan_market():
                 embed.add_field(name="Signal Type", value=signal['type'], inline=True)
                 embed.add_field(name="Timeframe", value=signal['tf'].upper(), inline=True)
                 embed.add_field(name="Close Price", value=str(signal['close']), inline=True)
-                embed.add_field(name="9 EMA", value=str(signal['ema_9']), inline=True)
-                embed.add_field(name="20 EMA", value=str(signal['ema_20']), inline=True)
                 embed.set_footer(text="TradeLocker MTF Scanner | 9/20/60/200 EMA System")
 
                 await channel.send(embed=embed)
@@ -310,16 +286,13 @@ async def ping(ctx):
 
 @bot.command(name="diag")
 async def diag(ctx, symbol: str = "EURUSD"):
-    """Diagnostic tool to pinpoint exact TradeLocker API data failures."""
     await ctx.send(f"🔍 **Running diagnostics for {symbol}...**")
     client = get_tl_client()
-    
     inst_id = get_instrument_id(client, symbol)
     if not inst_id:
         return await ctx.send(f"❌ Failed to find Instrument ID for {symbol}.")
     
     await ctx.send(f"✅ Found Instrument ID: `{inst_id}`")
-    
     try:
         history = client.get_price_history(
             instrument_id=inst_id, resolution="60",
@@ -327,11 +300,9 @@ async def diag(ctx, symbol: str = "EURUSD"):
         )
         if not history:
             return await ctx.send("❌ API connected, but returned empty history (None).")
-        
         candles = history if isinstance(history, list) else history.get("candles", [])
         if not candles:
             return await ctx.send(f"❌ API returned data, but no candles: `{history}`")
-            
         await ctx.send(f"✅ Success! Fetched {len(candles)} candles.")
     except Exception as e:
         await ctx.send(f"❌ API Error fetching history: `{e}`")
@@ -339,50 +310,91 @@ async def diag(ctx, symbol: str = "EURUSD"):
 
 @bot.command(name="radar")
 async def radar(ctx):
-    await ctx.send("📡 **Running 9/20/60/200 EMA Market Radar...** Analyzing 1H structure.")
+    """Restored multi-timeframe Pattern & EMA Stacking Dashboard checking 4H, 1H, 30M, 15M, and 1M."""
+    await ctx.send("📡 **Generating Pattern & EMA Stacking Dashboard (4H, 1H, 30M, 15M, 1M)...**")
     
     embed = discord.Embed(
-        title="📡 Market Radar: EMA Stack Snapshot",
-        description="Current market structure relative to 9, 20, 60, and 200 EMAs (1H Trend):",
-        color=discord.Color.blue()
+        title="📈 PATTERN & EMA STACKING DASHBOARD",
+        description="4H Structure → EMA Alignment → 15M/30M Value → 1M Trigger",
+        color=discord.Color.dark_embed()
     )
 
     for symbol in SYMBOLS:
-        df = fetch_market_data(symbol, timeframe_res="60")
-        if df is None:
-            embed.add_field(name=f"**{symbol}**", value="⚠️ Data Unavailable", inline=True)
+        # Fetch multi-timeframe data across all 5 required resolutions
+        df_4h = calculate_indicators(fetch_market_data(symbol, timeframe_res=TIMEFRAMES["4h"]))
+        df_1h = calculate_indicators(fetch_market_data(symbol, timeframe_res=TIMEFRAMES["1h"]))
+        df_30m = calculate_indicators(fetch_market_data(symbol, timeframe_res=TIMEFRAMES["30m"]))
+        df_15m = calculate_indicators(fetch_market_data(symbol, timeframe_res=TIMEFRAMES["15m"]))
+        df_1m = calculate_indicators(fetch_market_data(symbol, timeframe_res=TIMEFRAMES["1m"]))
+
+        if df_4h is None or df_1h is None:
+            embed.add_field(name=f"🔹 {symbol}", value="⚠️ Data Unavailable", inline=False)
             continue
 
-        df = calculate_indicators(df)
-        if df is None or df.empty:
-            embed.add_field(name=f"**{symbol}**", value="⚠️ Calculation Error", inline=True)
-            continue
-
-        latest = df.iloc[-1]
-        
-        if latest['ema_9'] > latest['ema_20'] > latest['ema_60'] > latest['ema_200']:
-            alignment = "🟢 FULL BULLISH STACK"
-        elif latest['ema_9'] < latest['ema_20'] < latest['ema_60'] < latest['ema_200']:
-            alignment = "🔴 FULL BEARISH STACK"
+        # 4H Structure & Pattern Analysis
+        latest_4h = df_4h.iloc[-1]
+        prev_4h = df_4h.iloc[-2]
+        if latest_4h['close'] > prev_4h['close']:
+            h4_pattern = "📈 HIGHER HIGHS & HIGHER LOWS"
+            h4_stack = "BULLISH BIAS (WEAK STACK) 🐂" if latest_4h['ema_9'] < latest_4h['ema_20'] else "BULLISH EXPANSION 🟢"
         else:
-            alignment = "⚡ Mixed Alignment"
+            h4_pattern = "📉 LOWER HIGHS & LOWER LOWS"
+            h4_stack = "BEARISH BIAS (WEAK STACK) 🐻" if latest_4h['ema_9'] > latest_4h['ema_20'] else "BEARISH EXPANSION 🔴"
 
-        embed.add_field(
-            name=f"**{symbol}**",
-            value=f"**Structure:** {alignment}\n**Price:** {latest['close']}\n**9 EMA:** {round(latest['ema_9'], 5)}",
-            inline=True
+        # 1H Stack Bias
+        latest_1h = df_1h.iloc[-1]
+        if latest_1h['ema_9'] > latest_1h['ema_20']:
+            h1_stack = "BULLISH EXPANSION 🟢"
+        else:
+            h1_stack = "BEARISH EXPANSION 🔴"
+
+        # 30M Stack Bias
+        m30_stack = "⚡ 30M BULLISH ALIGNMENT"
+        if df_30m is not None and not df_30m.empty:
+            latest_30m = df_30m.iloc[-1]
+            if latest_30m['ema_9'] > latest_30m['ema_20']:
+                m30_stack = "🟢 30M BULLISH BIAS"
+            else:
+                m30_stack = "🔴 30M BEARISH BIAS"
+
+        # 15M Setup Zone
+        m15_setup = "⚡ EXTENDED FROM EMAS"
+        if df_15m is not None and not df_15m.empty:
+            latest_15m = df_15m.iloc[-1]
+            diff_from_20 = abs(latest_15m['close'] - latest_15m['ema_20'])
+            if diff_from_20 < (latest_15m['close'] * 0.0005):
+                m15_setup = "👀 AT 15M 20 EMA (PRIME RE-ENTRY)"
+
+        # 1M Trigger State
+        m1_trigger = "⚪ NO 1M TRIGGER"
+        if df_1m is not None and len(df_1m) >= 2:
+            sig_1m = analyze_signals(symbol, "1m", df_1m)
+            if sig_1m:
+                m1_trigger = f"🚨 {sig_1m['type']} CROSS TRIGGER"
+
+        current_price = latest_1h['close']
+
+        dashboard_text = (
+            f"• **4H Pattern:** {h4_pattern}\n"
+            f"• **4H EMA Stack:** {h4_stack}\n"
+            f"• **1H EMA Stack:** {h1_stack}\n"
+            f"• **30M Stack:** {m30_stack}\n"
+            f"• **15M Setup:** {m15_setup}\n"
+            f"• **1M Trigger:** {m1_trigger}\n"
+            f"• **Price:** `{current_price}`"
         )
+
+        embed.add_field(name=f"🔷 **{symbol}**", value=dashboard_text, inline=False)
         await asyncio.sleep(0.3)
 
-    embed.set_footer(text="TradeLocker Radar | 9/20/60/200 EMA Alignment")
+    embed.set_footer(text="TradeLocker Dashboard | 4H, 1H, 30M, 15M, 1M Scanned")
     await ctx.send(embed=embed)
 
 
 @bot.command(name="scalp")
 async def scalp(ctx):
     await ctx.send("⚡ **Scalp Scanner Activated:** Scanning 1M and 15M charts for 9/20 EMA triggers...")
-    
-    scalp_timeframes = {"15m": "15", "1m": "1"}
+    scalp_timeframes = {"15m": TIMEFRAMES["15m"], "1m": TIMEFRAMES["1m"]}
     scalp_signals = 0
 
     for symbol in SYMBOLS:
@@ -390,7 +402,6 @@ async def scalp(ctx):
             df = fetch_market_data(symbol, timeframe_res=tf_res)
             if df is None:
                 continue
-
             df = calculate_indicators(df)
             signal = analyze_signals(symbol, tf_label, df)
 
@@ -404,8 +415,6 @@ async def scalp(ctx):
                 embed.add_field(name="Signal Type", value=signal['type'], inline=True)
                 embed.add_field(name="Timeframe", value=signal['tf'].upper(), inline=True)
                 embed.add_field(name="Price", value=str(signal['close']), inline=True)
-                embed.add_field(name="9 EMA", value=str(signal['ema_9']), inline=True)
-                embed.add_field(name="20 EMA", value=str(signal['ema_20']), inline=True)
                 embed.set_footer(text="Fast Execution Scalp Trigger")
 
                 await ctx.send(embed=embed)
@@ -427,7 +436,6 @@ async def manual_scan(ctx):
             df = fetch_market_data(symbol, timeframe_res=tf_res)
             if df is None:
                 continue
-
             df = calculate_indicators(df)
             signal = analyze_signals(symbol, tf_label, df)
 
