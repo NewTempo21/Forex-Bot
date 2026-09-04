@@ -10,53 +10,15 @@ from tradelocker import TLAPI
 import tradelocker.tradelocker_api as tl_api
 
 # ==============================================================================
-# BULLETPROOF TRADELOCKER LIBRARY BUG FIX
+# NUCLEAR TRADELOCKER BUG FIX (TOTAL BYPASS)
 # ==============================================================================
+# Completely short-circuit the strict type-checking function that keeps crashing.
 if hasattr(tl_api, '_apply_typing'):
-    original_apply_typing = tl_api._apply_typing
-    
-    def safe_apply_typing(*args, **kwargs):
-        import pandas as pd
-        new_args = list(args)
-        
-        # 1. Aggressively strip 'status' out of any incoming DataFrame or List
-        for arg in new_args:
-            if isinstance(arg, pd.DataFrame) and 'status' in arg.columns:
-                arg.drop(columns=['status'], inplace=True)
-            elif isinstance(arg, list):
-                for item in arg:
-                    if isinstance(item, dict):
-                        item.pop('status', None)
-                        
-        for k, v in kwargs.items():
-            if isinstance(v, pd.DataFrame) and 'status' in v.columns:
-                v.drop(columns=['status'], inplace=True)
-            elif isinstance(v, list):
-                for item in v:
-                    if isinstance(item, dict):
-                        item.pop('status', None)
-                        
-        # 2. Force inject 'status' into the library's strict type dictionary
-        for arg in new_args:
-            if isinstance(arg, dict) and 'accountBalance' in arg:
-                arg['status'] = object
-        for k, v in kwargs.items():
-            if isinstance(v, dict) and 'accountBalance' in v:
-                v['status'] = object
-                
-        try:
-            return original_apply_typing(*new_args, **kwargs)
-        except Exception as e:
-            # 3. Ultimate Fallback: If it still crashes, bypass the type checker entirely
-            # and just return the raw DataFrame so the bot can boot.
-            for arg in new_args:
-                if isinstance(arg, pd.DataFrame):
-                    return arg
-                if isinstance(arg, list):
-                    return pd.DataFrame(arg)
-            return new_args[0] if new_args else None
-            
-    tl_api._apply_typing = safe_apply_typing
+    def nuclear_bypass(data, *args, **kwargs):
+        if isinstance(data, list):
+            return pd.DataFrame(data)
+        return data
+    tl_api._apply_typing = nuclear_bypass
 
 # ==============================================================================
 # FLASK WEB SERVER (FOR REPLIT/RENDER HEALTH CHECKS)
