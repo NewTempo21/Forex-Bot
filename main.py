@@ -15,20 +15,31 @@ import tradelocker.tradelocker_api as tl_api
 if hasattr(tl_api, '_apply_typing'):
     original_apply_typing = tl_api._apply_typing
     
-    def safe_apply_typing(*args, **kwargs):
-        new_args = list(args)
-        for i, arg in enumerate(new_args):
-            if isinstance(arg, dict) and 'id' in arg and 'currency' in arg:
-                arg['status'] = str
-                new_args[i] = arg
-        for k, v in kwargs.items():
-            if isinstance(v, dict) and 'id' in v and 'currency' in v:
-                v['status'] = str
-                kwargs[k] = v
+    def safe_apply_typing(data, *args, **kwargs):
+        import pandas as pd
+        # TradeLocker API added a 'status' field that the old python library schema doesn't map.
+        # This causes a strict typing crash. We pop the unmapped fields before the original function runs.
+        keys_to_remove = ['status']
+        
+        if isinstance(data, pd.DataFrame):
+            for k in keys_to_remove:
+                if k in data.columns:
+                    data.drop(columns=[k], inplace=True)
+        elif isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict):
+                    for k in keys_to_remove:
+                        item.pop(k, None)
+        elif isinstance(data, dict):
+            for k in keys_to_remove:
+                data.pop(k, None)
+                
         try:
-            return original_apply_typing(*new_args, **kwargs)
+            return original_apply_typing(data, *args, **kwargs)
         except Exception:
-            return new_args[0] if new_args else None
+            if isinstance(data, list): 
+                return pd.DataFrame(data)
+            return data
             
     tl_api._apply_typing = safe_apply_typing
 
@@ -150,14 +161,13 @@ def debug_print_instruments():
         print(f"[DEBUG] Could not dump instruments: {e}")
 
 # ==============================================================================
-# MARKET DATA FETCHING (WITH DYNAMIC LOOKBACK FIX)
+# MARKET DATA FETCHING 
 # ==============================================================================
 def fetch_market_data(symbol, timeframe_res):
     client = get_tl_client()
     if not client:
         return None
 
-    # Dynamically assign lookback to guarantee 200+ candles per timeframe
     lookback = "5D"
     if timeframe_res == "240":
         lookback = "60D"
@@ -316,7 +326,6 @@ async def diag(ctx, symbol: str = "EURUSD"):
     except Exception as e:
         await ctx.send(f"❌ API Error fetching history: `{e}`")
 
-
 @bot.command(name="radar")
 async def radar(ctx):
     await ctx.send("📡 **Generating Pattern & EMA Stacking Dashboard (4H, 1H, 30M, 15M, 1M)...**")
@@ -401,7 +410,6 @@ async def radar(ctx):
     embed.set_footer(text="TradeLocker Dashboard | 4H, 1H, 30M, 15M, 1M Scanned")
     await ctx.send(embed=embed)
 
-
 @bot.command(name="scalp")
 async def scalp(ctx):
     await ctx.send("⚡ **Scalp Scanner Activated:** Scanning 1M and 15M charts for 9/20 EMA triggers...")
@@ -435,7 +443,6 @@ async def scalp(ctx):
         await ctx.send("⚡ **Scalp Scan Complete:** No active 1M/15M EMA crossover triggers.")
     else:
         await ctx.send(f"⚡ **Scalp Scan Complete:** Found {scalp_signals} active setup(s).")
-
 
 @bot.command(name="scan")
 async def manual_scan(ctx):
