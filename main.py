@@ -10,23 +10,33 @@ from tradelocker import TLAPI
 import tradelocker.tradelocker_api as tl_api
 
 # ==============================================================================
-# TRADELOCKER LIBRARY BUG FIX (PATCH FOR HEROFX ACCOUNT STATUS FIELD)
+# TRADELOCKER LIBRARY BUG FIX (STANDALONE FUNCTION PATCH)
 # ==============================================================================
-original_apply_typing = tl_api.TLAPI._apply_typing
-def safe_apply_typing(self, data, *args, **kwargs):
-    if isinstance(data, dict):
-        if 'status' not in data:
-            data['status'] = 'active'
-    elif isinstance(data, list):
-        for item in data:
-            if isinstance(item, dict) and 'status' not in item:
-                item['status'] = 'active'
-    try:
-        return original_apply_typing(self, data, *args, **kwargs)
-    except Exception as e:
-        return data
-
-tl_api.TLAPI._apply_typing = safe_apply_typing
+if hasattr(tl_api, '_apply_typing'):
+    original_apply_typing = tl_api._apply_typing
+    
+    def safe_apply_typing(*args, **kwargs):
+        new_args = list(args)
+        
+        # Look for the type specification dictionary in args and inject 'status'
+        for i, arg in enumerate(new_args):
+            if isinstance(arg, dict) and 'id' in arg and 'currency' in arg:
+                arg['status'] = str
+                new_args[i] = arg
+                
+        # Look for the type specification dictionary in kwargs and inject 'status'
+        for k, v in kwargs.items():
+            if isinstance(v, dict) and 'id' in v and 'currency' in v:
+                v['status'] = str
+                kwargs[k] = v
+                
+        try:
+            return original_apply_typing(*new_args, **kwargs)
+        except Exception as e:
+            print(f"[PATCH WARNING] Bypassed _apply_typing error: {e}")
+            return new_args[0] if new_args else None
+            
+    tl_api._apply_typing = safe_apply_typing
 
 # ==============================================================================
 # FLASK WEB SERVER (FOR REPLIT/RENDER HEALTH CHECKS)
@@ -94,10 +104,9 @@ def get_tl_client():
     return tl_client
 
 # ==============================================================================
-# INSTRUMENT RESOLUTION & DEBUG DUMPER
+# INSTRUMENT RESOLUTION
 # ==============================================================================
 def get_instrument_id(client, symbol):
-    """Robustly resolves instrument ID from HeroFX broker specifications."""
     try:
         try:
             iid = client.get_instrument_id_from_symbol_name(symbol)
@@ -133,7 +142,6 @@ def get_instrument_id(client, symbol):
     return None
 
 def debug_print_instruments():
-    """Prints all broker instruments to Render console to verify naming convention."""
     client = get_tl_client()
     if not client:
         return
@@ -447,7 +455,7 @@ async def manual_scan(ctx):
 @bot.event
 async def on_ready():
     print(f"[SUCCESS] Bot connected as {bot.user.name} (ID: {bot.user.id})")
-    debug_print_instruments() # Dumps exact broker names to logs
+    debug_print_instruments()
     if not scan_market.is_running():
         scan_market.start()
 
