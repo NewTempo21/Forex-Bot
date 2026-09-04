@@ -32,11 +32,11 @@ def keep_alive():
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
 
-# TradeLocker API Credentials
-TL_EMAIL = os.getenv("TRADELOCKER_EMAIL")
-TL_PASSWORD = os.getenv("TRADELOCKER_PASSWORD")
-TL_SERVER = os.getenv("TRADELOCKER_SERVER") 
-TL_ENVIRONMENT = os.getenv("TRADELOCKER_ENV", "https://live.tradelocker.com")
+# TradeLocker API Credentials (Updated for HeroFX Render variables)
+TL_EMAIL = os.getenv("HEROFX_EMAIL")
+TL_PASSWORD = os.getenv("HEROFX_PASSWORD")
+TL_SERVER = os.getenv("HEROFX_SERVER", "HeroFX-Live") 
+TL_ENVIRONMENT = os.getenv("HEROFX_ENV", "https://live.tradelocker.com")
 
 # Bot configuration
 SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "GBPJPY"]
