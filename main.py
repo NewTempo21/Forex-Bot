@@ -7,6 +7,26 @@ from discord.ext import commands, tasks
 import pandas as pd
 import ta
 from tradelocker import TLAPI
+import tradelocker.tradelocker_api as tl_api
+
+# ==============================================================================
+# TRADELOCKER LIBRARY BUG FIX (PATCH FOR HEROFX ACCOUNT STATUS FIELD)
+# ==============================================================================
+original_apply_typing = tl_api.TLAPI._apply_typing
+def safe_apply_typing(self, data, *args, **kwargs):
+    if isinstance(data, dict):
+        if 'status' not in data:
+            data['status'] = 'active'
+    elif isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict) and 'status' not in item:
+                item['status'] = 'active'
+    try:
+        return original_apply_typing(self, data, *args, **kwargs)
+    except Exception as e:
+        return data
+
+tl_api.TLAPI._apply_typing = safe_apply_typing
 
 # ==============================================================================
 # FLASK WEB SERVER (FOR REPLIT/RENDER HEALTH CHECKS)
@@ -73,12 +93,10 @@ def get_tl_client():
     return tl_client
 
 # ==============================================================================
-# INSTRUMENT RESOLUTION & DEBUG DUMPER
+# INSTRUMENT RESOLUTION
 # ==============================================================================
 def get_instrument_id(client, symbol):
-    """Robustly resolves instrument ID from HeroFX broker specifications."""
     try:
-        # 1. Try standard library method
         try:
             iid = client.get_instrument_id_from_symbol_name(symbol)
             if iid:
@@ -86,18 +104,15 @@ def get_instrument_id(client, symbol):
         except Exception:
             pass
 
-        # 2. Pull all instruments and inspect format
         instruments = client.get_all_instruments()
         clean_target = symbol.upper().replace("/", "").replace(".", "")
 
-        # Helper to extract rows/items
         items = []
         if isinstance(instruments, pd.DataFrame):
             items = instruments.to_dict(orient='records')
         elif isinstance(instruments, list):
             items = instruments
         elif isinstance(instruments, dict):
-            # Try typical dictionary wrappers
             for k, v in instruments.items():
                 if isinstance(v, list):
                     items = v
@@ -115,25 +130,6 @@ def get_instrument_id(client, symbol):
     
     return None
 
-def debug_print_instruments():
-    """Prints all broker instruments to Render console to verify naming convention."""
-    client = get_tl_client()
-    if not client:
-        return
-    try:
-        instruments = client.get_all_instruments()
-        print("=== AVAILABLE BROKER INSTRUMENTS ===")
-        if isinstance(instruments, pd.DataFrame):
-            for _, row in instruments.iterrows():
-                print(f"Name: {row.get('name')} | ID: {row.get('tradableInstrumentId') or row.get('id')}")
-        elif isinstance(instruments, list):
-            for item in instruments:
-                if isinstance(item, dict):
-                    print(f"Name: {item.get('name')} | ID: {item.get('tradableInstrumentId') or item.get('id')}")
-        print("====================================")
-    except Exception as e:
-        print(f"[DEBUG] Could not dump instruments: {e}")
-
 # ==============================================================================
 # MARKET DATA FETCHING
 # ==============================================================================
@@ -145,7 +141,6 @@ def fetch_market_data(symbol, timeframe_res, lookback="5D"):
     try:
         instrument_id = get_instrument_id(client, symbol)
         if not instrument_id:
-            print(f"[WARNING] Instrument ID not found for symbol: {symbol}")
             return None
 
         history = client.get_price_history(
@@ -361,7 +356,6 @@ async def manual_scan(ctx):
 @bot.event
 async def on_ready():
     print(f"[SUCCESS] Bot connected as {bot.user.name} (ID: {bot.user.id})")
-    debug_print_instruments() # Dumps exact broker names to logs
     if not scan_market.is_running():
         scan_market.start()
 
