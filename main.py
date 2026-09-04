@@ -6,7 +6,7 @@ import discord
 from discord.ext import commands, tasks
 import pandas as pd
 import ta
-import requests
+from tradelocker import TLAPI
 
 # ==============================================================================
 # FLASK WEB SERVER (FOR RENDER HEALTH CHECKS)
@@ -15,7 +15,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "Bot is alive and monitoring 9/20/60/200 EMA markets!"
+    return "Bot is alive and monitoring 9/20/60/200 EMA markets via TradeLocker!"
 
 def run_web_server():
     port = int(os.getenv("PORT", 8080))
@@ -35,13 +35,13 @@ DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
 # TradeLocker API Credentials
 TL_EMAIL = os.getenv("TRADELOCKER_EMAIL")
 TL_PASSWORD = os.getenv("TRADELOCKER_PASSWORD")
-TL_SERVER = os.getenv("TRADELOCKER_SERVER")
-TL_BASE_URL = "https://live.tradelocker.com/api/v2"
+TL_SERVER = os.getenv("TRADELOCKER_SERVER") 
+TL_ENVIRONMENT = os.getenv("TRADELOCKER_ENV", "https://live.tradelocker.com")
 
 # Bot configuration (Six standard pairs)
 SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "GBPJPY"]
 
-# Multi-Timeframe mapping for TradeLocker API resolutions
+# Timeframe mapping matching TradeLocker resolutions
 TIMEFRAMES = {
     "4h": "4h",
     "1h": "1h",
@@ -51,110 +51,105 @@ TIMEFRAMES = {
 }
 
 intents = discord.Intents.default()
-intents.message_content = True  # Required for processing '!' commands
+intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ==============================================================================
-# TRADELOCKER API FUNCTIONS
-# ==============================================================================
-def get_tradelocker_token():
-    """Authenticates with TradeLocker and returns an access token."""
-    url = f"{TL_BASE_URL}/auth/jwt/token"
-    payload = {
-        "email": TL_EMAIL,
-        "password": TL_PASSWORD,
-        "server": TL_SERVER
-    }
-    headers = {"Content-Type": "application/json"}
-    
-    try:
-        response = requests.post(url, json=payload, headers=headers, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        return data.get("accessToken")
-    except Exception as e:
-        print(f"[ERROR] Failed to authenticate with TradeLocker: {e}")
+# Initialize TradeLocker Official API Client
+tl_client = None
+
+def get_tl_client():
+    global tl_client
+    if tl_client is None:
+        try:
+            tl_client = TLAPI(
+                environment=TL_ENVIRONMENT,
+                username=TL_EMAIL,
+                password=TL_PASSWORD,
+                server=TL_SERVER
+            )
+            print("[SUCCESS] Connected to TradeLocker API successfully.")
+        except Exception as e:
+            print(f"[CRITICAL] Failed to initialize TradeLocker client: {e}")
+            tl_client = None
+    return tl_client
+
+def fetch_market_data(symbol, timeframe_res, lookback="200D"):
+    """Fetches historical candle data for a given symbol and resolution using the official library."""
+    client = get_tl_client()
+    if not client:
         return None
 
-def fetch_market_data(symbol, timeframe_res, limit=250):
-    """Fetches historical price data for a given symbol and resolution."""
-    token = get_tradelocker_token()
-    if not token:
-        return None
-
-    url = f"{TL_BASE_URL}/market/candles"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
-    }
-    params = {
-        "symbol": symbol,
-        "resolution": timeframe_res,
-        "limit": limit
-    }
-
     try:
-        response = requests.get(url, headers=headers, params=params, timeout=10)
-        response.raise_for_status()
-        candles = response.json().get("candles", [])
+        instrument_id = client.get_instrument_id_from_symbol_name(symbol)
+        if not instrument_id:
+            return None
+
+        history = client.get_price_history(
+            instrument_id=int(instrument_id),
+            resolution=timeframe_res,
+            lookback_period=lookback
+        )
         
+        if not history or "candles" not in history:
+            candles = history if isinstance(history, list) else history.get("candles", [])
+        else:
+            candles = history["candles"]
+
         if not candles:
             return None
 
-        # Convert candle array into a structured Pandas DataFrame
         df = pd.DataFrame(candles)
-        df = df.rename(columns={
-            't': 'timestamp',
-            'o': 'open',
-            'h': 'high',
-            'l': 'low',
-            'c': 'close',
-            'v': 'volume'
-        })
+        rename_map = {}
+        for col in df.columns:
+            if col in ['t', 'timestamp']: rename_map[col] = 'timestamp'
+            elif col in ['o', 'open']: rename_map[col] = 'open'
+            elif col in ['h', 'high']: rename_map[col] = 'high'
+            elif col in ['l', 'low']: rename_map[col] = 'low'
+            elif col in ['c', 'close']: rename_map[col] = 'close'
+            elif col in ['v', 'volume']: rename_map[col] = 'volume'
         
-        # Ensure numeric types
+        df = df.rename(columns=rename_map)
+        
         for col in ['open', 'high', 'low', 'close', 'volume']:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
 
         return df
     except Exception as e:
-        print(f"[ERROR] Failed to fetch candles for {symbol} ({timeframe_res}): {e}")
+        print(f"[ERROR] Failed fetching data for {symbol} ({timeframe_res}): {e}")
         return None
 
 # ==============================================================================
 # TECHNICAL ANALYSIS & 9/20/60/200 EMA STRATEGY
 # ==============================================================================
 def calculate_indicators(df):
-    """Calculates 9, 20, 60, and 200 EMAs along with RSI using pure-Python 'ta' library."""
-    if df is None or df.empty or len(df) < 200:
+    """Calculates 9, 20, 60, and 200 EMAs along with RSI."""
+    if df is None or df.empty or len(df) < 30:
         return None
 
-    # Calculate 9, 20, 60, and 200 EMAs
     df['ema_9'] = ta.trend.ema_indicator(df['close'], window=9)
     df['ema_20'] = ta.trend.ema_indicator(df['close'], window=20)
     df['ema_60'] = ta.trend.ema_indicator(df['close'], window=60)
-    df['ema_200'] = ta.trend.ema_indicator(df['close'], window=200)
+    
+    if len(df) >= 200:
+        df['ema_200'] = ta.trend.ema_indicator(df['close'], window=200)
+    else:
+        df['ema_200'] = ta.trend.ema_indicator(df['close'], window=len(df)-1)
 
-    # RSI (14 period)
     df['rsi'] = ta.momentum.rsi(df['close'], window=14)
-
     return df
 
 def analyze_signals(symbol, tf_label, df):
-    """Evaluates 9/20 EMA crossovers filtered by 60/200 EMA alignment."""
+    """Evaluates 9/20 EMA crossovers."""
     if df is None or len(df) < 2:
         return None
 
     latest = df.iloc[-1]
     previous = df.iloc[-2]
 
-    # Check for recent 9 EMA crossing above 20 EMA (Bullish Cross)
     bullish_cross = (previous['ema_9'] <= previous['ema_20']) and (latest['ema_9'] > latest['ema_20'])
-    
-    # Check for recent 9 EMA crossing below 20 EMA (Bearish Cross)
     bearish_cross = (previous['ema_9'] >= previous['ema_20']) and (latest['ema_9'] < latest['ema_20'])
 
-    # Trend structure checks using 60 and 200 EMAs
     if bullish_cross:
         return {
             "symbol": symbol,
@@ -187,13 +182,11 @@ def analyze_signals(symbol, tf_label, df):
 # ==============================================================================
 @tasks.loop(minutes=3)
 async def scan_market():
-    """Background task scanning all 6 pairs across 4H, 1H, 30M, 15M, and 1M charts."""
     channel = bot.get_channel(DISCORD_CHANNEL_ID)
     if not channel:
-        print(f"[WARNING] Discord channel ID {DISCORD_CHANNEL_ID} not found.")
         return
 
-    print("[INFO] Starting 9/20/60/200 EMA multi-timeframe scan...")
+    print("[INFO] Starting automated 9/20 EMA multi-timeframe scan...")
 
     for symbol in SYMBOLS:
         for tf_label, tf_res in TIMEFRAMES.items():
@@ -207,7 +200,7 @@ async def scan_market():
             if signal:
                 color = discord.Color.green() if "BUY" in signal['type'] else discord.Color.red()
                 embed = discord.Embed(
-                    title=f"🚨 9/20 EMA Cross Alert: {signal['symbol']} ({signal['tf'].upper()})",
+                    title=f"🚨 EMA Crossover Alert: {signal['symbol']} ({signal['tf'].upper()})",
                     color=color
                 )
                 embed.add_field(name="Signal Type", value=signal['type'], inline=True)
@@ -221,38 +214,33 @@ async def scan_market():
                 embed.set_footer(text="TradeLocker MTF Scanner | 9/20/60/200 EMA System")
 
                 await channel.send(embed=embed)
-                print(f"[ALERT] Sent {signal['type']} signal for {symbol} ({signal['tf'].upper()}) to Discord.")
-
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(0.3)
 
 @scan_market.before_loop
 async def before_scan():
-    """Wait until the Discord bot is fully logged in before starting scanner loop."""
     await bot.wait_until_ready()
 
 # ==============================================================================
-# DISCORD INTERACTIVE COMMANDS
+# DISCORD COMMANDS
 # ==============================================================================
 @bot.command(name="ping")
 async def ping(ctx):
-    """Simple ping command to verify bot responsiveness."""
-    await ctx.send("🏓 Pong! Bot is active and monitoring EMA setups.")
+    await ctx.send("🏓 Pong! Bot is active.")
 
 @bot.command(name="status")
 async def status(ctx):
-    """Checks the scanner loop status and monitored pairs."""
     is_running = scan_market.is_running()
     status_msg = "🟢 Active" if is_running else "🔴 Stopped"
-    await ctx.send(f"**MTF Scanner Status:** {status_msg}\n**Pairs:** {', '.join(SYMBOLS)}\n**Strategy:** 9/20/60/200 EMA Crossover")
+    await ctx.send(f"**Scanner Status:** {status_msg}\n**Pairs:** {', '.join(SYMBOLS)}")
 
 @bot.command(name="radar")
 async def radar(ctx):
-    """Manual market radar scanning all 6 pairs across all timeframes for EMA trends."""
-    await ctx.send("📡 **Running 9/20/60/200 EMA Market Radar...** Scanning all timeframes.")
+    """Manual market radar scanning all pairs for EMA stack structure and trend bias."""
+    await ctx.send("📡 **Running 9/20/60/200 EMA Market Radar...** Analyzing 1H structure.")
     
     embed = discord.Embed(
         title="📡 Market Radar: EMA Stack Snapshot",
-        description="Current market structure relative to the 9, 20, 60, and 200 EMAs (1H Trend):",
+        description="Current market structure relative to 9, 20, 60, and 200 EMAs (1H Trend):",
         color=discord.Color.blue()
     )
 
@@ -264,11 +252,11 @@ async def radar(ctx):
 
         df = calculate_indicators(df)
         if df is None or df.empty:
+            embed.add_field(name=f"**{symbol}**", value="⚠️ Calculation Error", inline=True)
             continue
 
         latest = df.iloc[-1]
         
-        # Check overall EMA stack order
         if latest['ema_9'] > latest['ema_20'] > latest['ema_60'] > latest['ema_200']:
             alignment = "🟢 FULL BULLISH STACK"
         elif latest['ema_9'] < latest['ema_20'] < latest['ema_60'] < latest['ema_200']:
@@ -320,10 +308,10 @@ async def scalp(ctx):
                 embed.set_footer(text="Fast Execution Scalp Trigger")
 
                 await ctx.send(embed=embed)
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(0.3)
 
     if scalp_signals == 0:
-        await ctx.send("⚡ **Scalp Scan Complete:** No 1M/15M EMA crossover triggers active right now.")
+        await ctx.send("⚡ **Scalp Scan Complete:** No active 1M/15M EMA crossover triggers.")
     else:
         await ctx.send(f"⚡ **Scalp Scan Complete:** Found {scalp_signals} active setup(s).")
 
@@ -346,20 +334,17 @@ async def manual_scan(ctx):
                 signals_found += 1
                 color = discord.Color.green() if "BUY" in signal['type'] else discord.Color.red()
                 embed = discord.Embed(
-                    title=f"🚨 Forex Signal Alert: {signal['symbol']} ({signal['tf'].upper()})",
+                    title=f"🚨 Manual Scan Alert: {signal['symbol']} ({signal['tf'].upper()})",
                     color=color
                 )
                 embed.add_field(name="Signal Type", value=signal['type'], inline=True)
                 embed.add_field(name="Timeframe", value=signal['tf'].upper(), inline=True)
                 embed.add_field(name="Close Price", value=str(signal['close']), inline=True)
-                embed.add_field(name="9 EMA", value=str(signal['ema_9']), inline=True)
-                embed.add_field(name="20 EMA", value=str(signal['ema_20']), inline=True)
-                embed.add_field(name="60 EMA", value=str(signal['ema_60']), inline=True)
-                embed.add_field(name="200 EMA", value=str(signal['ema_200']), inline=True)
+                embed.add_field(name="9/20 EMAs", value=f"{signal['ema_9']} / {signal['ema_20']}", inline=True)
                 embed.set_footer(text="TradeLocker MTF Scanner | 9/20/60/200 EMA System")
 
                 await ctx.send(embed=embed)
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(0.3)
 
     if signals_found == 0:
         await ctx.send("✅ Manual scan complete. No active EMA crossover signals found at this time.")
