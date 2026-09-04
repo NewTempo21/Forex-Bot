@@ -56,16 +56,13 @@ def keep_alive():
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
 
-# TradeLocker API Credentials (HeroFX Render variables)
 TL_EMAIL = os.getenv("HEROFX_EMAIL")
 TL_PASSWORD = os.getenv("HEROFX_PASSWORD")
 TL_SERVER = os.getenv("HEROFX_SERVER", "HeroFX-Live") 
 TL_ENVIRONMENT = os.getenv("HEROFX_ENV", "https://live.tradelocker.com")
 
-# Bot configuration
 SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "GBPJPY"]
 
-# Timeframe mapping (TradingView format: Minutes)
 TIMEFRAMES = {
     "4h": "240",
     "1h": "60",
@@ -78,7 +75,6 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Initialize TradeLocker Official API Client
 tl_client = None
 
 def get_tl_client():
@@ -154,12 +150,25 @@ def debug_print_instruments():
         print(f"[DEBUG] Could not dump instruments: {e}")
 
 # ==============================================================================
-# MARKET DATA FETCHING
+# MARKET DATA FETCHING (WITH DYNAMIC LOOKBACK FIX)
 # ==============================================================================
-def fetch_market_data(symbol, timeframe_res, lookback="5D"):
+def fetch_market_data(symbol, timeframe_res):
     client = get_tl_client()
     if not client:
         return None
+
+    # Dynamically assign lookback to guarantee 200+ candles per timeframe
+    lookback = "5D"
+    if timeframe_res == "240":
+        lookback = "60D"
+    elif timeframe_res == "60":
+        lookback = "30D"
+    elif timeframe_res == "30":
+        lookback = "15D"
+    elif timeframe_res == "15":
+        lookback = "10D"
+    elif timeframe_res == "1":
+        lookback = "3D"
 
     try:
         instrument_id = get_instrument_id(client, symbol)
@@ -310,7 +319,6 @@ async def diag(ctx, symbol: str = "EURUSD"):
 
 @bot.command(name="radar")
 async def radar(ctx):
-    """Pattern & EMA Stacking Dashboard checking 4H, 1H, 30M, 15M, and 1M."""
     await ctx.send("📡 **Generating Pattern & EMA Stacking Dashboard (4H, 1H, 30M, 15M, 1M)...**")
     
     embed = discord.Embed(
@@ -320,7 +328,6 @@ async def radar(ctx):
     )
 
     for symbol in SYMBOLS:
-        # Fetch data independently across all timeframes
         df_4h = calculate_indicators(fetch_market_data(symbol, timeframe_res=TIMEFRAMES["4h"]))
         df_1h = calculate_indicators(fetch_market_data(symbol, timeframe_res=TIMEFRAMES["1h"]))
         df_30m = calculate_indicators(fetch_market_data(symbol, timeframe_res=TIMEFRAMES["30m"]))
