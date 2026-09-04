@@ -10,36 +10,51 @@ from tradelocker import TLAPI
 import tradelocker.tradelocker_api as tl_api
 
 # ==============================================================================
-# TRADELOCKER LIBRARY BUG FIX (STANDALONE FUNCTION PATCH)
+# BULLETPROOF TRADELOCKER LIBRARY BUG FIX
 # ==============================================================================
 if hasattr(tl_api, '_apply_typing'):
     original_apply_typing = tl_api._apply_typing
     
-    def safe_apply_typing(data, *args, **kwargs):
+    def safe_apply_typing(*args, **kwargs):
         import pandas as pd
-        # TradeLocker API added a 'status' field that the old python library schema doesn't map.
-        # This causes a strict typing crash. We pop the unmapped fields before the original function runs.
-        keys_to_remove = ['status']
+        new_args = list(args)
         
-        if isinstance(data, pd.DataFrame):
-            for k in keys_to_remove:
-                if k in data.columns:
-                    data.drop(columns=[k], inplace=True)
-        elif isinstance(data, list):
-            for item in data:
-                if isinstance(item, dict):
-                    for k in keys_to_remove:
-                        item.pop(k, None)
-        elif isinstance(data, dict):
-            for k in keys_to_remove:
-                data.pop(k, None)
+        # 1. Aggressively strip 'status' out of any incoming DataFrame or List
+        for arg in new_args:
+            if isinstance(arg, pd.DataFrame) and 'status' in arg.columns:
+                arg.drop(columns=['status'], inplace=True)
+            elif isinstance(arg, list):
+                for item in arg:
+                    if isinstance(item, dict):
+                        item.pop('status', None)
+                        
+        for k, v in kwargs.items():
+            if isinstance(v, pd.DataFrame) and 'status' in v.columns:
+                v.drop(columns=['status'], inplace=True)
+            elif isinstance(v, list):
+                for item in v:
+                    if isinstance(item, dict):
+                        item.pop('status', None)
+                        
+        # 2. Force inject 'status' into the library's strict type dictionary
+        for arg in new_args:
+            if isinstance(arg, dict) and 'accountBalance' in arg:
+                arg['status'] = object
+        for k, v in kwargs.items():
+            if isinstance(v, dict) and 'accountBalance' in v:
+                v['status'] = object
                 
         try:
-            return original_apply_typing(data, *args, **kwargs)
-        except Exception:
-            if isinstance(data, list): 
-                return pd.DataFrame(data)
-            return data
+            return original_apply_typing(*new_args, **kwargs)
+        except Exception as e:
+            # 3. Ultimate Fallback: If it still crashes, bypass the type checker entirely
+            # and just return the raw DataFrame so the bot can boot.
+            for arg in new_args:
+                if isinstance(arg, pd.DataFrame):
+                    return arg
+                if isinstance(arg, list):
+                    return pd.DataFrame(arg)
+            return new_args[0] if new_args else None
             
     tl_api._apply_typing = safe_apply_typing
 
