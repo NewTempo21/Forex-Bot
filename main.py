@@ -60,21 +60,49 @@ US_GBP_PAIRS = [
 ]
 
 def get_instrument_id(symbol_name):
-    """Dynamically fetches or caches the broker instrument ID for a given symbol."""
+    """Universal robust instrument ID fetcher handling TradeLocker's columnar and list formats."""
     symbol_name = symbol_name.upper()
     if symbol_name in instrument_cache:
         return instrument_cache[symbol_name]
+        
     try:
-        instruments = tl_client.get_instruments()
-        inst_list = instruments.get('d', []) if isinstance(instruments, dict) else instruments
-        for inst in inst_list:
-            name = inst.get('name') or inst.get('symbol')
-            if name == symbol_name:
-                inst_id = inst.get('id') or inst.get('instrumentId')
-                instrument_cache[symbol_name] = inst_id
-                return inst_id
+        response = tl_client.get_instruments()
+        
+        # Unpack response wrapper if present
+        data = response.get('d', response) if isinstance(response, dict) else response
+        
+        # Case 1: Columnar dictionary format (e.g., {'id': [...], 'name': [...]})
+        if isinstance(data, dict) and ('name' in data or 'symbol' in data):
+            names = data.get('name', data.get('symbol', []))
+            ids = data.get('id', data.get('instrumentId', []))
+            for i in range(min(len(names), len(ids))):
+                if str(names[i]).upper() == symbol_name:
+                    inst_id = ids[i]
+                    instrument_cache[symbol_name] = inst_id
+                    return inst_id
+                    
+        # Case 2: List of dictionaries or objects
+        if isinstance(data, list):
+            for inst in data:
+                if isinstance(inst, dict):
+                    name = str(inst.get('name') or inst.get('symbol') or '').upper()
+                    if name == symbol_name:
+                        inst_id = inst.get('id') or inst.get('instrumentId')
+                        instrument_cache[symbol_name] = inst_id
+                        return inst_id
+                        
+        # Case 3: Pandas DataFrame
+        if isinstance(data, pd.DataFrame):
+            for _, row in data.iterrows():
+                name = str(row.get('name') or row.get('symbol') or '').upper()
+                if name == symbol_name:
+                    inst_id = row.get('id') or row.get('instrumentId')
+                    instrument_cache[symbol_name] = inst_id
+                    return inst_id
+                    
     except Exception as e:
         print(f"Error fetching instrument ID for {symbol_name}: {e}")
+        
     return None
 
 # ==========================================
@@ -193,7 +221,7 @@ async def scan(ctx, timeframe: str = "15m"):
         report.append(f"   • Zone: *{zone}*")
         report.append("")
         
-    # Send report in chunks to avoid hitting Discord character limits
+    # Send report in chunks to avoid hitting Discord limits
     message_chunk = ""
     for line in report:
         if len(message_chunk) + len(line) + 1 > 1900:
@@ -254,4 +282,3 @@ if __name__ == "__main__":
     else:
         keep_alive()
         bot.run(DISCORD_TOKEN)
-
