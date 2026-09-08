@@ -60,7 +60,7 @@ US_GBP_PAIRS = [
 ]
 
 def get_instrument_id(symbol_name):
-    """Universal robust instrument ID fetcher handling TradeLocker's columnar and list formats."""
+    """Deep-scans TradeLocker's instrument response structure for matching symbols."""
     symbol_name = symbol_name.upper()
     if symbol_name in instrument_cache:
         return instrument_cache[symbol_name]
@@ -68,38 +68,40 @@ def get_instrument_id(symbol_name):
     try:
         response = tl_client.get_instruments()
         
-        # Unpack response wrapper if present
-        data = response.get('d', response) if isinstance(response, dict) else response
-        
-        # Case 1: Columnar dictionary format (e.g., {'id': [...], 'name': [...]})
-        if isinstance(data, dict) and ('name' in data or 'symbol' in data):
-            names = data.get('name', data.get('symbol', []))
-            ids = data.get('id', data.get('instrumentId', []))
-            for i in range(min(len(names), len(ids))):
-                if str(names[i]).upper() == symbol_name:
-                    inst_id = ids[i]
-                    instrument_cache[symbol_name] = inst_id
-                    return inst_id
-                    
-        # Case 2: List of dictionaries or objects
-        if isinstance(data, list):
-            for inst in data:
-                if isinstance(inst, dict):
-                    name = str(inst.get('name') or inst.get('symbol') or '').upper()
-                    if name == symbol_name:
-                        inst_id = inst.get('id') or inst.get('instrumentId')
-                        instrument_cache[symbol_name] = inst_id
-                        return inst_id
-                        
-        # Case 3: Pandas DataFrame
-        if isinstance(data, pd.DataFrame):
-            for _, row in data.iterrows():
-                name = str(row.get('name') or row.get('symbol') or '').upper()
-                if name == symbol_name:
-                    inst_id = row.get('id') or row.get('instrumentId')
-                    instrument_cache[symbol_name] = inst_id
-                    return inst_id
-                    
+        # Helper function to recursively search nested lists/dicts for the symbol
+        def search_data(obj):
+            if isinstance(obj, list):
+                for item in obj:
+                    res = search_data(item)
+                    if res:
+                        return res
+            elif isinstance(obj, dict):
+                # Check if this dictionary represents a symbol/instrument
+                vals = [str(v).upper() for v in obj.values() if v is not None]
+                if symbol_name in vals:
+                    # Look for an ID key within this dict
+                    for id_key in ['id', 'instrumentId', 'contractId', 'sId']:
+                        if id_key in obj:
+                            return obj[id_key]
+                # Check specific name/symbol keys
+                name = str(obj.get('name') or obj.get('symbol') or obj.get('description') or '').upper()
+                if name == symbol_name or symbol_name in name:
+                    for id_key in ['id', 'instrumentId', 'contractId', 'sId']:
+                        if id_key in obj:
+                            return obj[id_key]
+                # Otherwise, recurse deeper into dict values
+                for v in obj.values():
+                    if isinstance(v, (dict, list)):
+                        res = search_data(v)
+                        if res:
+                            return res
+            return None
+
+        found_id = search_data(response)
+        if found_id:
+            instrument_cache[symbol_name] = found_id
+            return found_id
+            
     except Exception as e:
         print(f"Error fetching instrument ID for {symbol_name}: {e}")
         
