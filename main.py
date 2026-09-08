@@ -15,7 +15,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "Forex Trading Bot is active and monitoring markets."
+    return "Forex Trading Bot is active and monitoring HeroFX markets."
 
 def run_web_server():
     port = int(os.getenv("PORT", 8080))
@@ -45,14 +45,13 @@ tl_client = TLAPI(
     server=TL_SERVER
 )
 
-# Initialize Discord Bot
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 instrument_cache = {}
 
-# Comprehensive Watchlist of US Pairs and GBP Pairs
+# Standard Watchlist (Bot will automatically find the .raw versions)
 US_GBP_PAIRS = [
     "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", 
     "USDCAD", "NZDUSD", "USDCHF", "GBPJPY", 
@@ -60,48 +59,41 @@ US_GBP_PAIRS = [
 ]
 
 def get_instrument_id(symbol_name):
-    """Deep-scans TradeLocker's instrument response structure for matching symbols."""
+    """
+    Fetches the broker instrument ID. 
+    Automatically checks for HeroFX raw spread suffixes (.raw, .r).
+    """
     symbol_name = symbol_name.upper()
+    possible_names = [symbol_name, f"{symbol_name}.RAW", f"{symbol_name}.R"]
+    
     if symbol_name in instrument_cache:
         return instrument_cache[symbol_name]
         
     try:
-        response = tl_client.get_instruments()
+        instruments = tl_client.get_instruments()
+        data = instruments.get('d', instruments) if isinstance(instruments, dict) else instruments
         
-        # Helper function to recursively search nested lists/dicts for the symbol
-        def search_data(obj):
-            if isinstance(obj, list):
-                for item in obj:
-                    res = search_data(item)
-                    if res:
-                        return res
-            elif isinstance(obj, dict):
-                # Check if this dictionary represents a symbol/instrument
-                vals = [str(v).upper() for v in obj.values() if v is not None]
-                if symbol_name in vals:
-                    # Look for an ID key within this dict
-                    for id_key in ['id', 'instrumentId', 'contractId', 'sId']:
-                        if id_key in obj:
-                            return obj[id_key]
-                # Check specific name/symbol keys
-                name = str(obj.get('name') or obj.get('symbol') or obj.get('description') or '').upper()
-                if name == symbol_name or symbol_name in name:
-                    for id_key in ['id', 'instrumentId', 'contractId', 'sId']:
-                        if id_key in obj:
-                            return obj[id_key]
-                # Otherwise, recurse deeper into dict values
-                for v in obj.values():
-                    if isinstance(v, (dict, list)):
-                        res = search_data(v)
-                        if res:
-                            return res
-            return None
-
-        found_id = search_data(response)
-        if found_id:
-            instrument_cache[symbol_name] = found_id
-            return found_id
-            
+        if isinstance(data, list):
+            for inst in data:
+                if isinstance(inst, dict):
+                    inst_name = str(inst.get('name', inst.get('symbol', ''))).upper()
+                    if inst_name in possible_names:
+                        inst_id = inst.get('id', inst.get('instrumentId'))
+                        if inst_id:
+                            instrument_cache[symbol_name] = inst_id
+                            return inst_id
+                            
+        elif isinstance(data, dict):
+            names = data.get('name', data.get('symbol', []))
+            ids = data.get('id', data.get('instrumentId', []))
+            if names and ids:
+                for i in range(min(len(names), len(ids))):
+                    inst_name = str(names[i]).upper()
+                    if inst_name in possible_names:
+                        inst_id = ids[i]
+                        instrument_cache[symbol_name] = inst_id
+                        return inst_id
+                        
     except Exception as e:
         print(f"Error fetching instrument ID for {symbol_name}: {e}")
         
@@ -111,24 +103,22 @@ def get_instrument_id(symbol_name):
 # 3. INDICATOR & MARKET STATE ENGINE
 # ==========================================
 def fetch_and_calculate_indicators(symbol_id, resolution):
-    """Safely fetches candle data, normalizes columns, and calculates 9, 20, 60, 200 EMAs + RSI."""
+    """Fetches candle data safely and calculates EMAs and RSI."""
     try:
         data = tl_client.get_tabular_data(symbol_id=symbol_id, resolution=resolution)
-        if isinstance(data, pd.DataFrame):
-            df = data.copy()
-        elif isinstance(data, dict):
-            df = pd.DataFrame(data)
-        else:
-            df = pd.DataFrame(data)
+        if not data:
+            return None
             
+        df = pd.DataFrame(data)
         df.columns = [str(c).lower() for c in df.columns]
+        
         price_col = 'close' if 'close' in df.columns else (df.columns[-1] if len(df.columns) > 0 else None)
         if not price_col:
             return None
             
         close_series = pd.to_numeric(df[price_col], errors='coerce')
         
-        # Calculate EMAs (9, 20, 60, 200) and RSI
+        # Calculate EMAs and RSI
         df['ema_9'] = ta.trend.EMAIndicator(close=close_series, window=9).ema_indicator()
         df['ema_20'] = ta.trend.EMAIndicator(close=close_series, window=20).ema_indicator()
         df['ema_60'] = ta.trend.EMAIndicator(close=close_series, window=60).ema_indicator()
@@ -137,11 +127,11 @@ def fetch_and_calculate_indicators(symbol_id, resolution):
         
         return df
     except Exception as e:
-        print(f"Indicator calculation error for ID {symbol_id} at {resolution}: {e}")
+        print(f"Indicator calculation error: {e}")
         return None
 
 def analyze_market_conditions(df):
-    """Analyzes trend state, RSI, and re-entry zones for a chart."""
+    """Determines market trend and re-entry zones based on the 9/20/60/200 EMAs."""
     if df is None or len(df) < 5:
         return "Unknown", 50, "Insufficient Data"
         
@@ -153,24 +143,24 @@ def analyze_market_conditions(df):
     ema200 = last_row.get('ema_200', 0)
     rsi = round(last_row.get('rsi', 50), 1)
     
-    # Trend State
+    # Check Trend
     if ema9 > ema20 > ema60 > ema200 and close > ema9:
-        state = "🟢 Bullish Trend"
+        state = "🟢 Bullish"
     elif ema9 < ema20 < ema60 < ema200 and close < ema9:
-        state = "🔴 Bearish Trend"
+        state = "🔴 Bearish"
     else:
-        state = "🟡 Consolidating / Ranging"
+        state = "🟡 Consolidating"
         
-    # Re-entry Zone Check
+    # Check Zones
     dist_to_20 = abs(close - ema20) / close * 100
     dist_to_60 = abs(close - ema60) / close * 100
     
     if dist_to_20 <= 0.05:
-        zone = "🎯 Pullback at 20 EMA (Active Re-entry)"
+        zone = "🎯 Pullback at 20 EMA (Re-entry)"
     elif dist_to_60 <= 0.08:
-        zone = "🎯 Pullback at 60 EMA (Deep Value Zone)"
+        zone = "🎯 Pullback at 60 EMA (Value Zone)"
     else:
-        zone = "⚖️ Moving freely between EMAs"
+        zone = "⚖️ Moving freely"
         
     return state, rsi, zone
 
@@ -179,42 +169,41 @@ def analyze_market_conditions(df):
 # ==========================================
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user.name}. Trading engine operational.")
+    print(f"Logged in as {bot.user.name}. Ready to trade.")
 
 @bot.command(name="scan")
-async def scan(ctx, timeframe: str = "15m"):
+async def scan(ctx, timeframe: str = "30m"):
     """
     Scans all US and GBP pairs on a chosen timeframe.
-    Usage: !scan 15m  OR  !scan 4h  OR  !scan 1h
+    Defaults to 30m if no timeframe is typed.
     """
     tf_map = {
-        "1m": "1", "5m": "5", "15m": "15", 
-        "30m": "30", "1h": "60", "4h": "240"
+        "1m": "1",
+        "15m": "15",
+        "30m": "30",
+        "1h": "60",
+        "4h": "240"
     }
     
     tf_clean = timeframe.lower()
     if tf_clean not in tf_map:
-        await ctx.send(f"❌ Invalid timeframe `{timeframe}`. Use: `4h`, `1h`, `30m`, `15m`, or `1m`.")
+        await ctx.send(f"❌ Invalid timeframe. Please use `4h`, `1h`, `30m`, `15m`, or `1m`.")
         return
         
     resolution = tf_map[tf_clean]
-    await ctx.send(f"📡 **Scanning All US & GBP Pairs ({tf_clean.upper()})**... Please stand by.")
+    await ctx.send(f"📡 **Scanning US & GBP Pairs ({tf_clean.upper()})**... Please stand by.")
     
-    report = [
-        f"📊 **US & GBP MARKET SCAN ({tf_clean.upper()})**",
-        "Framework: 9, 20, 60, 200 EMAs + RSI & Re-entry Zones",
-        ""
-    ]
+    report = [f"📊 **MARKET SCAN ({tf_clean.upper()})**", ""]
     
     for symbol in US_GBP_PAIRS:
         symbol_id = get_instrument_id(symbol)
         if not symbol_id:
-            report.append(f"🔷 **{symbol}**: ⚠️ ID Not Found")
+            report.append(f"🔷 **{symbol}**: ⚠️ ID Not Found on HeroFX")
             continue
             
         df = fetch_and_calculate_indicators(symbol_id, resolution=resolution)
-        if df is None or len(df) < 5:
-            report.append(f"🔷 **{symbol}**: ⚠️ Data Unavailable")
+        if df is None:
+            report.append(f"🔷 **{symbol}**: ⚠️ Data Fetch Failed")
             continue
             
         state, rsi, zone = analyze_market_conditions(df)
@@ -223,7 +212,7 @@ async def scan(ctx, timeframe: str = "15m"):
         report.append(f"   • Zone: *{zone}*")
         report.append("")
         
-    # Send report in chunks to avoid hitting Discord limits
+    # Send report in chunks to bypass Discord message limits
     message_chunk = ""
     for line in report:
         if len(message_chunk) + len(line) + 1 > 1900:
@@ -235,45 +224,39 @@ async def scan(ctx, timeframe: str = "15m"):
         await ctx.send(message_chunk)
 
 @bot.command(name="chart")
-async def chart(ctx, symbol: str = "EURUSD", timeframe: str = "15m"):
-    """
-    Deep-dives into a single chart on demand.
-    Usage: !chart GBPUSD 4h
-    """
-    tf_map = {"1m": "1", "5m": "5", "15m": "15", "30m": "30", "1h": "60", "4h": "240"}
+async def chart(ctx, symbol: str = "EURUSD", timeframe: str = "30m"):
+    """Analyzes a specific chart on demand."""
+    tf_map = {"1m": "1", "15m": "15", "30m": "30", "1h": "60", "4h": "240"}
     tf_clean = timeframe.lower()
+    
     if tf_clean not in tf_map:
-        await ctx.send(f"❌ Invalid timeframe `{timeframe}`.")
+        await ctx.send("❌ Invalid timeframe.")
         return
         
     resolution = tf_map[tf_clean]
     symbol_upper = symbol.upper()
     
-    await ctx.send(f"🔍 Analyzing single chart for **{symbol_upper} ({tf_clean.upper()})**...")
+    await ctx.send(f"🔍 Analyzing **{symbol_upper} ({tf_clean.upper()})**...")
     
     symbol_id = get_instrument_id(symbol_upper)
     if not symbol_id:
-        await ctx.send(f"❌ Could not find instrument ID for `{symbol_upper}`.")
+        await ctx.send(f"❌ Could not find {symbol_upper} on HeroFX.")
         return
         
     df = fetch_and_calculate_indicators(symbol_id, resolution=resolution)
     if df is None:
-        await ctx.send(f"⚠️ Failed to fetch data for {symbol_upper}.")
+        await ctx.send(f"⚠️ Failed to fetch data.")
         return
         
     state, rsi, zone = analyze_market_conditions(df)
     
     report = [
-        f"📊 **SINGLE CHART: {symbol_upper} ({tf_clean.upper()})**",
+        f"📊 **CHART: {symbol_upper} ({tf_clean.upper()})**",
         f"• **Market State:** {state}",
         f"• **RSI (14):** `{rsi}`",
         f"• **Zone Status:** {zone}"
     ]
     await ctx.send("\n".join(report))
-
-@bot.command(name="radar")
-async def radar(ctx):
-    await ctx.send("📡 Type **`!scan [timeframe]`** to check all US and GBP pairs (e.g., `!scan 15m` or `!scan 4h`), or **`!chart [symbol] [timeframe]`** for an individual asset.")
 
 # ==========================================
 # 5. MAIN ENTRY POINT
