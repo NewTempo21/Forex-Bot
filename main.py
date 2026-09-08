@@ -144,11 +144,19 @@ def analyze_market_conditions(df):
 async def on_ready():
     print(f"Logged in as {bot.user.name}. Trading engine operational.")
 
+@bot.command(name="scan")
+async def scan(ctx, symbol: str = "EURUSD", timeframe: str = "15m"):
+    """
+    Scans a symbol on a specific timeframe.
+    Usage: !scan EURUSD 15m  or  !scan GBPUSD 4h
+    """
+    await ctx.invoke(bot.get_command('chart'), symbol=symbol, timeframe=timeframe)
+
 @bot.command(name="chart")
 async def chart(ctx, symbol: str = "EURUSD", timeframe: str = "15m"):
     """
     Independently analyzes ANY single chart on demand.
-    Usage: !chart EURUSD 4h  OR  !chart GBPUSD 15m  OR  !chart USDJPY 1m
+    Usage: !chart EURUSD 4h  OR  !chart GBPUSD 15m
     Supported timeframes: 4h, 1h, 30m, 15m, 1m
     """
     tf_map = {
@@ -192,10 +200,15 @@ async def chart(ctx, symbol: str = "EURUSD", timeframe: str = "15m"):
     
     await ctx.send("\n".join(report))
 
+@bot.command(name="scalp")
+async def scalp(ctx, symbol: str = "EURUSD"):
+    """Quick 1m scalping trigger check."""
+    await ctx.invoke(bot.get_command('chart'), symbol=symbol, timeframe="1m")
+
 @bot.command(name="radar")
 async def radar(ctx):
-    """Quick general overview across standard timeframes."""
-    await ctx.send("📡 Use **`!chart [symbol] [timeframe]`** to inspect any individual chart (e.g., `!chart EURUSD 15m` or `!chart GBPUSD 4h`).")
+    """Overview command."""
+    await ctx.send("📡 Use **`!scan [symbol] [timeframe]`** or **`!chart [symbol] [timeframe]`** to inspect any individual chart (e.g., `!scan EURUSD 15m` or `!chart GBPUSD 4h`).")
 
 # ==========================================
 # 5. MAIN ENTRY POINT
