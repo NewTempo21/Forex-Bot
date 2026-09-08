@@ -3,7 +3,7 @@ import asyncio
 from threading import Thread
 from flask import Flask
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 import pandas as pd
 import ta
 from tradelocker import TLAPI
@@ -15,7 +15,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "Bot is active and monitoring markets successfully."
+    return "Forex Trading Bot is active and monitoring markets."
 
 def run_web_server():
     port = int(os.getenv("PORT", 8080))
@@ -50,11 +50,31 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+instrument_cache = {}
+
+def get_instrument_id(symbol_name):
+    """Dynamically fetches or caches the broker instrument ID for a given symbol."""
+    symbol_name = symbol_name.upper()
+    if symbol_name in instrument_cache:
+        return instrument_cache[symbol_name]
+    try:
+        instruments = tl_client.get_instruments()
+        inst_list = instruments.get('d', []) if isinstance(instruments, dict) else instruments
+        for inst in inst_list:
+            name = inst.get('name') or inst.get('symbol')
+            if name == symbol_name:
+                inst_id = inst.get('id') or inst.get('instrumentId')
+                instrument_cache[symbol_name] = inst_id
+                return inst_id
+    except Exception as e:
+        print(f"Error fetching instrument ID for {symbol_name}: {e}")
+    return None
+
 # ==========================================
-# 3. ROBUST HELPER FUNCTIONS
+# 3. INDICATOR & MARKET STATE ENGINE
 # ==========================================
-def get_safe_candle_data(symbol_id, resolution):
-    """Safely fetches and normalizes candle data to prevent KeyErrors from broker updates."""
+def fetch_and_calculate_indicators(symbol_id, resolution):
+    """Safely fetches candle data, normalizes columns, and calculates 9, 20, 60, 200 EMAs + RSI."""
     try:
         data = tl_client.get_tabular_data(symbol_id=symbol_id, resolution=resolution)
         if isinstance(data, pd.DataFrame):
@@ -64,59 +84,118 @@ def get_safe_candle_data(symbol_id, resolution):
         else:
             df = pd.DataFrame(data)
             
-        # Normalize columns to lowercase strings to prevent key mismatches
         df.columns = [str(c).lower() for c in df.columns]
+        price_col = 'close' if 'close' in df.columns else (df.columns[-1] if len(df.columns) > 0 else None)
+        if not price_col:
+            return None
+            
+        close_series = pd.to_numeric(df[price_col], errors='coerce')
+        
+        # Calculate EMAs (9, 20, 60, 200) and RSI
+        df['ema_9'] = ta.trend.EMAIndicator(close=close_series, window=9).ema_indicator()
+        df['ema_20'] = ta.trend.EMAIndicator(close=close_series, window=20).ema_indicator()
+        df['ema_60'] = ta.trend.EMAIndicator(close=close_series, window=60).ema_indicator()
+        df['ema_200'] = ta.trend.EMAIndicator(close=close_series, window=200).ema_indicator()
+        df['rsi'] = ta.momentum.RSIIndicator(close=close_series, window=14).rsi()
+        
         return df
     except Exception as e:
-        print(f"Error fetching data for symbol {symbol_id} at resolution {resolution}: {e}")
+        print(f"Indicator calculation error for ID {symbol_id} at {resolution}: {e}")
         return None
 
+def analyze_market_conditions(df):
+    """Analyzes trend state, RSI, and re-entry zones for a single timeframe chart."""
+    if df is None or len(df) < 5:
+        return "Unknown", 50, "Insufficient Data"
+        
+    last_row = df.iloc[-1]
+    close = last_row.get('close', 0)
+    ema9 = last_row.get('ema_9', 0)
+    ema20 = last_row.get('ema_20', 0)
+    ema60 = last_row.get('ema_60', 0)
+    ema200 = last_row.get('ema_200', 0)
+    rsi = round(last_row.get('rsi', 50), 1)
+    
+    # Trend State
+    if ema9 > ema20 > ema60 > ema200 and close > ema9:
+        state = "🟢 Bullish Trend"
+    elif ema9 < ema20 < ema60 < ema200 and close < ema9:
+        state = "🔴 Bearish Trend"
+    else:
+        state = "🟡 Consolidating / Ranging"
+        
+    # Re-entry Zone Check
+    dist_to_20 = abs(close - ema20) / close * 100
+    dist_to_60 = abs(close - ema60) / close * 100
+    
+    if dist_to_20 <= 0.05:
+        zone = "🎯 Pullback at 20 EMA (Active Re-entry Zone)"
+    elif dist_to_60 <= 0.08:
+        zone = "🎯 Pullback at 60 EMA (Deep Value Zone)"
+    else:
+        zone = "⚖️ Price moving freely between EMAs"
+        
+    return state, rsi, zone
+
 # ==========================================
-# 4. DISCORD BOT EVENTS & COMMANDS
+# 4. DISCORD COMMANDS
 # ==========================================
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user.name} (ID: {bot.user.id})")
-    print("Bot is connected to TradeLocker and ready for commands.")
+    print(f"Logged in as {bot.user.name}. Trading engine operational.")
 
-@bot.command(name="ping")
-async def ping(ctx):
-    await ctx.send("Pong! Bot is online and operational.")
+@bot.command(name="chart")
+async def chart(ctx, symbol: str = "EURUSD", timeframe: str = "15m"):
+    """
+    Independently analyzes ANY single chart on demand.
+    Usage: !chart EURUSD 4h  OR  !chart GBPUSD 15m  OR  !chart USDJPY 1m
+    Supported timeframes: 4h, 1h, 30m, 15m, 1m
+    """
+    tf_map = {
+        "1m": "1",
+        "5m": "5",
+        "15m": "15",
+        "30m": "30",
+        "1h": "60",
+        "4h": "240"
+    }
+    
+    tf_clean = timeframe.lower()
+    if tf_clean not in tf_map:
+        await ctx.send(f"❌ Invalid timeframe `{timeframe}`. Use: `4h`, `1h`, `30m`, `15m`, or `1m`.")
+        return
+        
+    resolution = tf_map[tf_clean]
+    symbol_upper = symbol.upper()
+    
+    await ctx.send(f"🔍 Analyzing **{symbol_upper}** on the **{tf_clean.upper()}** chart...")
+    
+    symbol_id = get_instrument_id(symbol_upper)
+    if not symbol_id:
+        await ctx.send(f"❌ Could not find instrument ID for `{symbol_upper}`.")
+        return
+        
+    df = fetch_and_calculate_indicators(symbol_id, resolution=resolution)
+    if df is None:
+        await ctx.send(f"⚠️ Failed to fetch data for {symbol_upper} at {tf_clean.upper()}.")
+        return
+        
+    state, rsi, zone = analyze_market_conditions(df)
+    
+    report = [
+        f"📊 **CHART ANALYSIS: {symbol_upper} ({tf_clean.upper()})**",
+        f"• **Market State:** {state}",
+        f"• **RSI (14):** `{rsi}`",
+        f"• **Zone Status:** {zone}",
+        f"• **Framework:** 9 / 20 / 60 / 200 EMA Reactions"
+    ]
+    
+    await ctx.send("\n".join(report))
 
 @bot.command(name="radar")
 async def radar(ctx):
-    """Generates the multi-timeframe pattern and EMA stacking dashboard."""
-    await ctx.send("📡 Generating Pattern & EMA Stacking Dashboard (4H, 1H, 30M, 15M, 1M)...")
-    
-    symbols = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "GBPJPY"]
-    report_lines = [
-        "📊 **PATTERN & EMA STACKING DASHBOARD**",
-        "4H Structure → EMA Alignment → 15M/30M Value → 1M Trigger",
-        ""
-    ]
-    
-    for symbol in symbols:
-        try:
-            # Example placeholder lookup - replace/verify with your instrument mapping logic
-            # If instrument mapping fails, it safely falls back to Data Unavailable instead of crashing
-            report_lines.append(f"🔷 **{symbol}**")
-            report_lines.append("⚠️ Data Unavailable (Awaiting Broker Stream Sync)")
-        except Exception as e:
-            report_lines.append(f"🔷 **{symbol}**")
-            report_lines.append(f"❌ Error: {str(e)}")
-            
-    report_lines.append("")
-    report_lines.append("TradeLocker Dashboard | 4H, 1H, 30M, 15M, 1M Scanned")
-    
-    embed_text = "\n".join(report_lines)
-    await ctx.send(embed_text)
-
-@bot.command(name="scalp")
-async def scalp(ctx):
-    """Activates the scalp scanner for 1M and 15M triggers."""
-    await ctx.send("⚡ **Scalp Scanner Activated:** Scanning 1M and 15M charts for 9/20 EMA triggers...")
-    await asyncio.sleep(1)
-    await ctx.send("⚡ **Scalp Scan Complete:** No active 1M/15M EMA crossover triggers.")
+    """Quick general overview across standard timeframes."""
+    await ctx.send("📡 Use **`!chart [symbol] [timeframe]`** to inspect any individual chart (e.g., `!chart EURUSD 15m` or `!chart GBPUSD 4h`).")
 
 # ==========================================
 # 5. MAIN ENTRY POINT
