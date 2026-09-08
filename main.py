@@ -52,6 +52,13 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 instrument_cache = {}
 
+# Comprehensive Watchlist of US Pairs and GBP Pairs
+US_GBP_PAIRS = [
+    "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", 
+    "USDCAD", "NZDUSD", "USDCHF", "GBPJPY", 
+    "EURGBP", "GBPCAD", "GBPAUD", "GBPCHF"
+]
+
 def get_instrument_id(symbol_name):
     """Dynamically fetches or caches the broker instrument ID for a given symbol."""
     symbol_name = symbol_name.upper()
@@ -104,7 +111,7 @@ def fetch_and_calculate_indicators(symbol_id, resolution):
         return None
 
 def analyze_market_conditions(df):
-    """Analyzes trend state, RSI, and re-entry zones for a single timeframe chart."""
+    """Analyzes trend state, RSI, and re-entry zones for a chart."""
     if df is None or len(df) < 5:
         return "Unknown", 50, "Insufficient Data"
         
@@ -129,11 +136,11 @@ def analyze_market_conditions(df):
     dist_to_60 = abs(close - ema60) / close * 100
     
     if dist_to_20 <= 0.05:
-        zone = "🎯 Pullback at 20 EMA (Active Re-entry Zone)"
+        zone = "🎯 Pullback at 20 EMA (Active Re-entry)"
     elif dist_to_60 <= 0.08:
         zone = "🎯 Pullback at 60 EMA (Deep Value Zone)"
     else:
-        zone = "⚖️ Price moving freely between EMAs"
+        zone = "⚖️ Moving freely between EMAs"
         
     return state, rsi, zone
 
@@ -145,27 +152,14 @@ async def on_ready():
     print(f"Logged in as {bot.user.name}. Trading engine operational.")
 
 @bot.command(name="scan")
-async def scan(ctx, symbol: str = "EURUSD", timeframe: str = "15m"):
+async def scan(ctx, timeframe: str = "15m"):
     """
-    Scans a symbol on a specific timeframe.
-    Usage: !scan EURUSD 15m  or  !scan GBPUSD 4h
-    """
-    await ctx.invoke(bot.get_command('chart'), symbol=symbol, timeframe=timeframe)
-
-@bot.command(name="chart")
-async def chart(ctx, symbol: str = "EURUSD", timeframe: str = "15m"):
-    """
-    Independently analyzes ANY single chart on demand.
-    Usage: !chart EURUSD 4h  OR  !chart GBPUSD 15m
-    Supported timeframes: 4h, 1h, 30m, 15m, 1m
+    Scans all US and GBP pairs on a chosen timeframe.
+    Usage: !scan 15m  OR  !scan 4h  OR  !scan 1h
     """
     tf_map = {
-        "1m": "1",
-        "5m": "5",
-        "15m": "15",
-        "30m": "30",
-        "1h": "60",
-        "4h": "240"
+        "1m": "1", "5m": "5", "15m": "15", 
+        "30m": "30", "1h": "60", "4h": "240"
     }
     
     tf_clean = timeframe.lower()
@@ -174,9 +168,58 @@ async def chart(ctx, symbol: str = "EURUSD", timeframe: str = "15m"):
         return
         
     resolution = tf_map[tf_clean]
+    await ctx.send(f"📡 **Scanning All US & GBP Pairs ({tf_clean.upper()})**... Please stand by.")
+    
+    report = [
+        f"📊 **US & GBP MARKET SCAN ({tf_clean.upper()})**",
+        "Framework: 9, 20, 60, 200 EMAs + RSI & Re-entry Zones",
+        ""
+    ]
+    
+    for symbol in US_GBP_PAIRS:
+        symbol_id = get_instrument_id(symbol)
+        if not symbol_id:
+            report.append(f"🔷 **{symbol}**: ⚠️ ID Not Found")
+            continue
+            
+        df = fetch_and_calculate_indicators(symbol_id, resolution=resolution)
+        if df is None or len(df) < 5:
+            report.append(f"🔷 **{symbol}**: ⚠️ Data Unavailable")
+            continue
+            
+        state, rsi, zone = analyze_market_conditions(df)
+        report.append(f"🔷 **{symbol}** | RSI: `{rsi}`")
+        report.append(f"   • State: **{state}**")
+        report.append(f"   • Zone: *{zone}*")
+        report.append("")
+        
+    # Send report in chunks to avoid hitting Discord character limits
+    message_chunk = ""
+    for line in report:
+        if len(message_chunk) + len(line) + 1 > 1900:
+            await ctx.send(message_chunk)
+            message_chunk = line + "\n"
+        else:
+            message_chunk += line + "\n"
+    if message_chunk:
+        await ctx.send(message_chunk)
+
+@bot.command(name="chart")
+async def chart(ctx, symbol: str = "EURUSD", timeframe: str = "15m"):
+    """
+    Deep-dives into a single chart on demand.
+    Usage: !chart GBPUSD 4h
+    """
+    tf_map = {"1m": "1", "5m": "5", "15m": "15", "30m": "30", "1h": "60", "4h": "240"}
+    tf_clean = timeframe.lower()
+    if tf_clean not in tf_map:
+        await ctx.send(f"❌ Invalid timeframe `{timeframe}`.")
+        return
+        
+    resolution = tf_map[tf_clean]
     symbol_upper = symbol.upper()
     
-    await ctx.send(f"🔍 Analyzing **{symbol_upper}** on the **{tf_clean.upper()}** chart...")
+    await ctx.send(f"🔍 Analyzing single chart for **{symbol_upper} ({tf_clean.upper()})**...")
     
     symbol_id = get_instrument_id(symbol_upper)
     if not symbol_id:
@@ -185,30 +228,22 @@ async def chart(ctx, symbol: str = "EURUSD", timeframe: str = "15m"):
         
     df = fetch_and_calculate_indicators(symbol_id, resolution=resolution)
     if df is None:
-        await ctx.send(f"⚠️ Failed to fetch data for {symbol_upper} at {tf_clean.upper()}.")
+        await ctx.send(f"⚠️ Failed to fetch data for {symbol_upper}.")
         return
         
     state, rsi, zone = analyze_market_conditions(df)
     
     report = [
-        f"📊 **CHART ANALYSIS: {symbol_upper} ({tf_clean.upper()})**",
+        f"📊 **SINGLE CHART: {symbol_upper} ({tf_clean.upper()})**",
         f"• **Market State:** {state}",
         f"• **RSI (14):** `{rsi}`",
-        f"• **Zone Status:** {zone}",
-        f"• **Framework:** 9 / 20 / 60 / 200 EMA Reactions"
+        f"• **Zone Status:** {zone}"
     ]
-    
     await ctx.send("\n".join(report))
-
-@bot.command(name="scalp")
-async def scalp(ctx, symbol: str = "EURUSD"):
-    """Quick 1m scalping trigger check."""
-    await ctx.invoke(bot.get_command('chart'), symbol=symbol, timeframe="1m")
 
 @bot.command(name="radar")
 async def radar(ctx):
-    """Overview command."""
-    await ctx.send("📡 Use **`!scan [symbol] [timeframe]`** or **`!chart [symbol] [timeframe]`** to inspect any individual chart (e.g., `!scan EURUSD 15m` or `!chart GBPUSD 4h`).")
+    await ctx.send("📡 Type **`!scan [timeframe]`** to check all US and GBP pairs (e.g., `!scan 15m` or `!scan 4h`), or **`!chart [symbol] [timeframe]`** for an individual asset.")
 
 # ==========================================
 # 5. MAIN ENTRY POINT
@@ -219,3 +254,4 @@ if __name__ == "__main__":
     else:
         keep_alive()
         bot.run(DISCORD_TOKEN)
+
