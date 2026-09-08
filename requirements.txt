@@ -3,4 +3,4 @@ discord.py
 pandas
 ta
 requests
-tradelocker
+git+https://github.com/NewTempo21/tradelocker-python.git
